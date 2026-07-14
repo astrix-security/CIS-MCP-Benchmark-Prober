@@ -1,0 +1,20 @@
+[project]
+name = "cis-mcp-probe"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Tal Skverer", email = "tal.skverer@astrix-security.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp>=1.28.1",
+]
+
+[project.scripts]
+cis-mcp-probe = "cis_mcp_probe:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
