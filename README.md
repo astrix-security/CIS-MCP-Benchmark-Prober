@@ -124,3 +124,12 @@ benchmark/        draft CIS benchmark source (git-ignored, confidential)
 
 Section 1 checks 1.1–1.4 implemented and validated against live servers. More
 checks and sections are added as the benchmark draft progresses.
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+## Disclaimer
+
+This project is part of the **CIS MCP Security Benchmark** effort and was
+developed by Tal Skverer. It is provided "as is", without warranty of any kind.
