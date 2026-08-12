@@ -244,9 +244,15 @@ class AuthPropagatesThroughProxies(Check):
         if not ctx.endpoint_url:
             return self._error("no endpoint to test against")
         if not ctx.auth_required:
-            return self._na(
-                "server does not require authentication; there is no credential "
-                "to enforce or propagate"
+            # No N/A here: the subsection is not operator-side, and we do have a
+            # check for it. A server that requires no authentication accepts an
+            # unauthenticated request, which is the condition this check fails
+            # on. The benchmark's own audit prints FAIL for the same observation.
+            return self._fail(
+                "server requires no authentication, so an unauthenticated "
+                "request reaches a response: authentication is not enforced "
+                "before the response is established",
+                auth_required=False,
             )
         if not ctx.access_token:
             return self._unknown(

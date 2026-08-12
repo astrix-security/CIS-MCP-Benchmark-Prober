@@ -23,7 +23,6 @@ _MARK = {
     Status.PASS: "PASS",
     Status.FAIL: "FAIL",
     Status.NOT_APPLICABLE: "N/A",
-    Status.MANUAL: "MANUAL",
     Status.REVISION_UNSUPPORTED: "NO-REV",
     Status.UNKNOWN: "UNKNOWN",
     Status.ERROR: "ERROR",
@@ -33,7 +32,6 @@ _MARK = {
 _ORDER = [
     Status.PASS,
     Status.FAIL,
-    Status.MANUAL,
     Status.REVISION_UNSUPPORTED,
     Status.UNKNOWN,
     Status.NOT_APPLICABLE,

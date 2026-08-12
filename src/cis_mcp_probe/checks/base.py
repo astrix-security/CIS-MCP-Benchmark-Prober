@@ -21,16 +21,30 @@ class Level(str, Enum):
 
 
 class Status(str, Enum):
+    """The only verdicts a check may return.
+
+    A check is scoped to the part of a recommendation we decided is worth
+    probing, which need not be the whole subsection. Within that scope:
+
+    * NOT_APPLICABLE - the entire subsection is operator-side and we defined no
+      check of our own for it.
+    * REVISION_UNSUPPORTED - the check is valid only for the latest spec and the
+      server does not support it.
+    * PASS - the server passes the check.
+    * FAIL - the server does not pass the check.
+    * UNKNOWN - this run cannot decide, a later run may.
+    * ERROR - a critical failure on our side means the check cannot be
+      determined.
+
+    Do not add verdicts or blur these boundaries.
+    """
+
     PASS = "PASS"
     FAIL = "FAIL"
-    NOT_APPLICABLE = "NOT_APPLICABLE"  # recommendation doesn't apply to this server
-    MANUAL = "MANUAL"  # needs human judgement; can't be decided by probing alone
-    # The check tests a mechanism that exists only in the target revision, and
-    # the server won't negotiate it. Distinct from UNKNOWN: nothing about this
-    # run can be improved, the server has to adopt the revision first.
+    NOT_APPLICABLE = "NOT_APPLICABLE"
     REVISION_UNSUPPORTED = "REVISION_UNSUPPORTED"
-    UNKNOWN = "UNKNOWN"  # couldn't decide this run (e.g. no baseline, no event in time)
-    ERROR = "ERROR"  # the probe itself failed to reach a verdict
+    UNKNOWN = "UNKNOWN"
+    ERROR = "ERROR"
 
 
 @dataclass
@@ -101,9 +115,6 @@ class Check:
 
     def _na(self, evidence: str, **details: Any) -> CheckResult:
         return self._make(Status.NOT_APPLICABLE, evidence, **details)
-
-    def _manual(self, evidence: str, **details: Any) -> CheckResult:
-        return self._make(Status.MANUAL, evidence, **details)
 
     def _unknown(self, evidence: str, **details: Any) -> CheckResult:
         return self._make(Status.UNKNOWN, evidence, **details)

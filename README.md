@@ -40,9 +40,9 @@ decide automatically — see [Scope & limitations](#scope--limitations).
 | 1.2 | L1 | Compares advertised capabilities and tool/resource/prompt names against a baseline we record ourselves per server URL. New items are flagged as drift. Capture/refresh with `--update-baseline`. |
 | 1.3 | L2 | Waits briefly for a `listChanged` event, then tries to invoke the newly added tool. Reports UNKNOWN if no event arrives in time. |
 | 1.4 | L1 | Confirms the server exposes non-empty `serverInfo` (name/version). |
-| 2.1 | L2 | Reports N/A: the audit is a host-side transport inventory plus a registry lookup, and a server reached by domain is a network transport by definition. |
+| 2.1 | L1 | Reports N/A: the audit is a host-side transport inventory plus a registry lookup, and a server reached by domain is a network transport by definition. |
 | 2.2 | L1 | Confirms plaintext HTTP isn't served, that TLS 1.0/1.1 are refused while 1.2+ is accepted, and that the certificate is currently valid. |
-| 2.3 | L1 | Confirms an unauthenticated request is refused and the same request with a credential is accepted. Per-proxy-hop forwarding needs proxy logs and is reported as operator-side. |
+| 2.3 | L2 | Confirms an unauthenticated request is refused and the same request with a credential is accepted with an SSE-framed response. Per-hop forwarding is not verified and is stated as a caveat. |
 | 2.4 | L1 | Confirms a request missing `Mcp-Method` is rejected, and that a header/body mismatch is rejected with `-32020`. 2026-07-28 only, so reports NO-REV against older servers. |
 | 2.5 | L1 | Sends a hostile `Origin` with no preceding `OPTIONS` and confirms it's refused with 403. |
 
@@ -103,7 +103,7 @@ the full per-server results are in [docs/checks.md](docs/checks.md).
 - **Black-box only.** It can't see operator-side artifacts (audit logs,
   enterprise registry, approved-capability baselines, host process inventory).
   Benchmark checks that depend on those are reduced to their externally
-  observable part, or reported N/A / UNKNOWN / MANUAL.
+  observable part, or reported N/A / UNKNOWN.
 - **Streamable HTTP only.** SSE-only servers won't establish a session yet.
 - **Endpoint discovery** tries `/mcp` and `/`, not arbitrary paths (e.g.
   Atlassian's `/v1/...`).

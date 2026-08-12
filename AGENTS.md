@@ -76,14 +76,39 @@ Two traps that have already cost time:
 If a check passes against every server, suspect it is not discriminating before
 believing it.
 
-### 5. Report results and never overstate them
+### 5. Verdicts — these rules are fixed
 
-- A verdict that needs a mechanism the server does not speak is
-  `REVISION_UNSUPPORTED` (`NO-REV`), not `UNKNOWN`. `UNKNOWN` means this run
-  could not decide and a later one might.
-- A response that cannot be attributed to the control is `ERROR`, not `PASS` or
-  `FAIL`. A bare 400 with no protocol error body is the common case: a gateway
-  may have rejected it, so it says nothing about the server.
+A check is scoped to the part of a subsection we decided is worth probing, which
+need not be the whole subsection. Within that scope, and in this order:
+
+0. **`NOT_APPLICABLE`** — the entirety of the subsection is operator-side and we
+   decided not to define our own check for it.
+1. **`REVISION_UNSUPPORTED`** — the check is valid only for the latest spec and
+   the server does not support it.
+2. **`PASS`** — the server passes the check.
+3. **`FAIL`** — the server does not pass the check.
+4. **`UNKNOWN`** — this run cannot decide, a later run may.
+5. **`ERROR`** — a critical failure on our side means the check cannot be
+   determined.
+
+Never stray from this unless Tal says so explicitly. There is no `MANUAL`: it was
+removed, because a check whose observable part is decidable has a real verdict.
+
+Consequences that are easy to get wrong:
+
+- **`N/A` is not "doesn't apply to this server".** It is only for a subsection we
+  chose not to probe at all. A server that requires no authentication does not
+  make 2.3 `N/A`, it makes it `FAIL`, because an unauthenticated request reaches
+  a response.
+- **A reduction never downgrades a verdict.** If the part we probe passes, the
+  verdict is `PASS`, and the unprobed part is a caveat in the evidence string.
+  Every reduced check follows this: 1.1 drops log inspection, 2.3 drops per-hop
+  forwarding, 2.5 substitutes a stand-in origin, and all three still `PASS`.
+- **A run that compares nothing cannot `PASS`.** `--update-baseline` captures a
+  baseline and tests nothing, so 1.2 reports `UNKNOWN` for that run.
+- **An unattributable response is `ERROR`, not `FAIL`.** A bare 400 with no
+  protocol error body may have come from a gateway, so it says nothing about the
+  server. `FAIL` asserts non-compliance and must be earned.
 - When a finding is read from the text rather than reproduced live, say so.
 
 ### 6. Write the tickets, keep them private

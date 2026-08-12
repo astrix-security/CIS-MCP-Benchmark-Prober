@@ -17,10 +17,9 @@ that was not achieved.
 |---------|---------|
 | `PASS` | The server satisfied the externally observable part of the check. |
 | `FAIL` | The server did not satisfy it. |
-| `N/A` | The check does not apply to this server, or is operator-side only. |
+| `N/A` | The entire subsection is operator-side and we defined no check of our own for it. |
 | `NO-REV` | The check tests a mechanism that exists only in a protocol revision this server does not negotiate. Nothing about the run can change this. |
 | `UNKNOWN` | This run could not decide, and a later run might. No baseline recorded yet, or no event arrived inside the wait window. |
-| `MANUAL` | Needs human judgement. |
 | `ERROR` | The probe itself failed to reach a verdict. |
 
 `NO-REV` and `UNKNOWN` are deliberately distinct. `UNKNOWN` is a property of the
@@ -64,6 +63,8 @@ then compared against a baseline stored per endpoint URL under
 **Reduction.** The benchmark expects an operator-maintained approved-capability
 baseline. The probe has no access to one, so it records its own and reports drift
 relative to that. Until a baseline exists for a server, the verdict is `UNKNOWN`.
+A run with `--update-baseline` is also `UNKNOWN`: capturing a baseline compares
+nothing, so that run cannot decide.
 
 ### 1.3 Capabilities added via listChanged are not silently invocable
 
@@ -185,8 +186,9 @@ the same authentication path without them. The cost is that the response is not
 guaranteed to be streamed, so the SSE-specific assertion is reported as
 unexercised rather than forced.
 
-A server that requires no authentication reports `N/A`, since there is no
-credential to enforce.
+A server that requires no authentication reports `FAIL`: an unauthenticated
+request reaches a response, which is the condition this check tests. The
+benchmark's own audit prints FAIL for the same observation.
 
 ### 2.4 Required request metadata headers are present and consistent with the body
 
@@ -286,7 +288,7 @@ above.
 | 1.4 | Server exposes non-empty serverInfo | PASS | PASS | PASS | PASS |
 | 2.1 | stdio preferred for local, single-user servers | N/A | N/A | N/A | N/A |
 | 2.2 | TLS required, plaintext disallowed | PASS | PASS | **FAIL** | PASS |
-| 2.3 | Auth propagates through proxies on SSE responses | N/A | PASS | PASS | UNKNOWN |
+| 2.3 | Auth propagates through proxies on SSE responses | **FAIL** | PASS | PASS | UNKNOWN |
 | 2.4 | Request metadata headers present and consistent | NO-REV | NO-REV | NO-REV | NO-REV |
 | 2.5 | Origin validated on all requests | **FAIL** | **FAIL** | PASS | **FAIL** |
 
@@ -306,11 +308,12 @@ above.
   `ECDHE-RSA-AES128-SHA` on the TLS 1.0 handshake. The other three refuse both
   legacy revisions, which shows the sub-test discriminates rather than passing
   everything.
-- **2.3 — 2/2 decided pass.** All three auth servers refuse the unauthenticated
-  request with 401 and accept the authenticated one with 200. Linear and Sentry
-  return `text/event-stream`, so the SSE assertion was exercised and both pass.
-  Stripe answers with plain JSON, so that assertion could not be exercised and
-  the verdict is UNKNOWN rather than a pass.
+- **2.3 — 2/3 decided pass.** Linear and Sentry refuse the unauthenticated
+  request with 401, accept the authenticated one with 200, and return
+  `text/event-stream`, so the SSE assertion was exercised and both pass. Stripe
+  answers with plain JSON, so that assertion could not be exercised and the
+  verdict is UNKNOWN. DeepWiki requires no authentication at all, so an
+  unauthenticated request reaches a response: FAIL.
 - **2.4 — `NO-REV` everywhere.** No live server negotiates 2026-07-28, so the
   routing headers and the `-32020` error do not exist to test. These verdicts
   will resolve on their own as servers adopt the revision.

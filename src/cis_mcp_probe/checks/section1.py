@@ -141,9 +141,13 @@ class CapabilityBaseline(Check):
 
         if ctx.update_baseline:
             path = baseline.save(ctx.endpoint_url, current)
-            return self._pass(
-                f"baseline captured: {len(current['capability_keys'])} capability "
-                f"key(s), {len(current['tools'])} tool(s)",
+            # Capturing a baseline compares nothing, so this run cannot decide.
+            # A later run against the stored baseline can: UNKNOWN, not PASS.
+            return self._unknown(
+                f"baseline captured this run ({len(current['capability_keys'])} "
+                f"capability key(s), {len(current['tools'])} tool(s)), so there "
+                f"was nothing to compare against. Re-run without "
+                f"--update-baseline to decide drift",
                 saved_to=str(path),
             )
 
