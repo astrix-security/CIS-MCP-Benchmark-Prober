@@ -104,24 +104,25 @@ identity at all — is implemented.
 
 ### 2.1 stdio is preferred for local, single-user servers
 
-**Level:** L2 (provisional)
+**Level:** L1 · **Benchmark assessment status:** Manual
 
 **What the check requires.** Local and single-user deployments should use the
 stdio transport. Every server on a network transport needs a documented
-operational justification in the enterprise registry.
+operational justification on file.
 
 **How the probe implements it.** It does not, and reports `N/A` with the detected
 transport as evidence.
 
-**Why.** Both halves are outside a remote client's view. The transport inventory
-needs host access to enumerate service units and listening sockets, and the
-justification lives in the registry. The check is also self-defeating remotely:
-any server reached by domain is a network transport by construction, so the
-answer would be predetermined.
+**Why.** Both halves are outside a remote client's view. The audit inventories
+service units and their listening sockets, which needs host access, and then
+requires a manual determination of the configured transport from the unit's
+`ExecStart` or the client configuration. The check is also self-defeating
+remotely: any server reached by domain is a network transport by construction, so
+the answer would be predetermined.
 
 ### 2.2 TLS is required and plaintext is disallowed
 
-**Level:** L1 (provisional)
+**Level:** L1 · **Benchmark assessment status:** Automated
 
 **What the check requires.** The server must not serve plaintext HTTP, must
 refuse TLS 1.0 and TLS 1.1 while accepting TLS 1.2 and above, and must present a
@@ -132,8 +133,10 @@ Any failing sub-test fails the check, and every sub-result is kept in the JSON
 `details`.
 
 - **Plaintext.** A `GET http://host/` without following redirects. A 200 fails. A
-  3xx or a refused connection passes. Redirects are deliberately not followed,
-  because following one would hide a compliant 3xx behind a final 200.
+  refused connection or a `426 Upgrade Required` passes. A 3xx passes only if its
+  `Location` header names an `https://` target: a redirect to another plaintext
+  URL still carries the next request in cleartext. Redirects are deliberately not
+  followed, because following one would hide the destination behind a final 200.
 - **Weak TLS.** One handshake per legacy revision, pinned so that minimum equals
   maximum, so the server cannot negotiate upward. A completed handshake means the
   server accepted that revision, which fails.
@@ -146,77 +149,113 @@ default. Without lowering the level, the handshake fails inside our own client
 and is indistinguishable from the server refusing, which would make the check
 pass against every server. With it, a failure is attributable to the server.
 
-### 2.3 Authentication is enforced and propagates through proxies
+### 2.3 Authentication propagates through proxies on request-scoped SSE responses
 
-**Level:** L1 (provisional)
+**Level:** L2 · **Benchmark assessment status:** Manual
 
 **What the check requires.** Authentication must be enforced before a
-request-scoped response stream is established, and the credential must reach the
-upstream server through every proxy hop.
+request-scoped SSE response stream is established, and enforcement must hold at
+every proxy hop, so an unauthenticated request cannot reach a streamed response.
 
 **How the probe implements it.** Sends the same request twice, once without a
 credential and once with the cached bearer token. The unauthenticated request
-must be refused and the authenticated one accepted. The probe also records
-whether the response came back SSE-framed or as plain JSON.
+must be refused, the authenticated one accepted, and the probe reads the response
+`Content-Type` to see whether the reply was an SSE stream.
 
-**Reductions.**
+**Why this reports MANUAL rather than PASS.** The benchmark states that a wire
+status code observed at the proxy is insufficient evidence of per-hop
+enforcement, because a proxy can authenticate, strip the credential, and forward
+an unauthenticated request that the backend answers successfully. Confirming
+arrival at the final upstream needs backend-side evidence: an access-log entry
+recording the credential or a derived identity, or per-hop trace data. The probe
+therefore decides only the wire part and reports MANUAL with that evidence.
 
-- The benchmark audit invokes a server-specific safe streaming tool. That name is
-  not discoverable from outside, and invoking a guessed tool against a production
-  server has side effects. The probe uses `tools/list`, which exercises the same
-  authentication path without them. The cost is that the response is not
-  guaranteed to be streamed, so the streaming-specific aspect is observed and
-  reported rather than forced.
-- Per-proxy-hop forwarding is not verified. The benchmark's own method for it is
-  to inspect each proxy's access log, which is operator-side. The evidence string
-  says so on every run.
+`FAIL` is still reported when an unauthenticated request is *accepted*. No proxy
+topology makes that compliant.
+
+**Reduction.** The benchmark audit invokes a server-specific safe streaming tool.
+That name is not discoverable from outside, and invoking a guessed tool against a
+production server has side effects. The probe uses `tools/list`, which exercises
+the same authentication path without them. The cost is that the response is not
+guaranteed to be streamed, so the SSE-specific assertion is reported as
+unexercised rather than forced.
 
 A server that requires no authentication reports `N/A`, since there is no
 credential to enforce.
 
-### 2.4 Routing headers are present and header/body mismatch is rejected
+### 2.4 Required request metadata headers are present and consistent with the body
 
-**Level:** L1 (provisional)
+**Level:** L1 · **Benchmark assessment status:** Automated
 
-**What the check requires.** Under 2026-07-28, every Streamable HTTP request must
-carry the `Mcp-Method` and `Mcp-Name` routing headers, and the server must reject
-any request whose headers contradict the JSON-RPC body. This lets gateways route
-without inspecting the body, and refuses header/body mismatch as a
-request-smuggling vector.
+**What the check requires.** Under 2026-07-28, selected request body fields are
+mirrored into HTTP headers so gateways can route without parsing the body.
+`MCP-Protocol-Version` and `Mcp-Method` are required on every request.
+`Mcp-Name` is required on `tools/call`, `resources/read` and `prompts/get`.
+Values that cannot be represented as plain ASCII use the specification's Base64
+sentinel format `=?base64?...?=`, which the server must decode before comparing
+to the body. A missing or disagreeing header must be rejected with HTTP 400 and
+JSON-RPC error `-32020` (HeaderMismatch).
 
-**How the probe implements it.** Two sub-tests, both required to pass.
+**How the probe implements it.** Four sub-tests, all required to pass.
 
-- A request omitting `Mcp-Method` must be rejected with HTTP 400.
-- A request whose `Mcp-Name` header names one tool while the body names another
-  must be rejected with HTTP 400 and JSON-RPC error `-32020` (HeaderMismatch).
+- `tools/list` with no `Mcp-Method`. `Mcp-Name` is correctly not required here.
+- `tools/call` with `Mcp-Method` but no `Mcp-Name`.
+- `tools/call` whose `Mcp-Name` header names a sentinel value while the body
+  names a real tool.
+- `tools/call` whose `Mcp-Name` is a Base64 sentinel that decodes to a value
+  different from the body, which must also be rejected.
 
-**Revision gate.** Both the routing headers and the `-32020` code exist only in
+**Attribution rule.** A 400 that does *not* carry `-32020` is reported as `ERROR`,
+not `PASS`. Gateways legitimately reject with a plain 400 and the specification
+permits intermediaries to omit the JSON-RPC error body, so such a response is not
+attributable to the MCP implementation. A `-32022`
+(UnsupportedProtocolVersion) response is also `ERROR`: it means the endpoint
+rejected the probe's own protocol version, so the header test never ran.
+
+**Reduction.** The benchmark's decode-acceptance half — that an encoded value
+which *matches* the body must be accepted — is not exercised, because a
+successful request would invoke the tool. The probe tests only the
+encoded-disagreement direction and states the omission in its evidence. If the
+server exposes no tool at all, the three `tools/call` probes cannot be built and
+the check reports `UNKNOWN`.
+
+**Revision gate.** The metadata headers and the `-32020` code exist only in
 2026-07-28. Against a server that will not negotiate that revision the probe
 returns `NO-REV` and records both the required and the negotiated revision,
 rather than reporting a failure for a mechanism that is simply absent.
 
 ### 2.5 Origin header is validated on all requests
 
-**Level:** L1 (provisional)
+**Level:** L1 · **Benchmark assessment status:** Automated
 
 **What the check requires.** The server must validate `Origin` on every request
 and refuse any Origin not on an operator-configured allowlist, returning HTTP
 403. Enforcement must apply to the request itself, not only to a CORS preflight.
 
-**How the probe implements it.** Sends a POST carrying
-`Origin: http://evil.example.com` with no preceding `OPTIONS` request, so the
-test exercises the request path rather than a preflight. An exact 403 passes.
+**How the probe implements it.** Three legs, identical except for the `Origin`
+header, with no preceding `OPTIONS` request, so the test exercises the request
+path rather than a preflight.
+
+- Hostile `Origin: https://cis-rebinding-probe.example` must return 403.
+- An allowlisted Origin must be accepted.
+- No `Origin` at all, recorded for compatibility awareness. Per the benchmark,
+  an absent Origin does not determine compliance, since non-browser MCP clients
+  routinely send none.
 
 The probe attaches the bearer token when it has one. On a server that requires
 authentication, an unauthenticated probe returns 401 for every Origin, which
 would hide whether Origin is validated at all.
 
+**Attribution rule.** If any leg returns 400, the request was rejected before
+Origin was evaluated — most likely a routing-header mismatch — so the probe
+reports `ERROR` rather than reading it as an Origin decision.
+
 **Reduction.** The allowlist is operator-configured and not externally
-discoverable, so the benchmark's allowed-Origin comparison cannot be reproduced
-exactly. The probe substitutes the server's own origin and says so in the
-evidence. The security-relevant direction, that a hostile Origin is refused, is
-fully decided. If the hostile Origin is correctly refused but the stand-in is
-also refused, the verdict is `UNKNOWN` rather than a claimed pass.
+discoverable, so the benchmark's allowed-Origin leg cannot be reproduced exactly.
+The probe substitutes the server's own origin and says so in the evidence. The
+security-relevant direction, that a hostile Origin is refused, is fully decided.
+If the hostile Origin is correctly refused but the stand-in is also refused, the
+verdict is `UNKNOWN` rather than a claimed pass.
 
 A refusal with a status other than 403 fails, but the evidence notes that the
 refusal may not be an Origin decision, so a reviewer can tell the two apart.
@@ -242,8 +281,8 @@ above.
 | 1.4 | Server exposes non-empty serverInfo | PASS | PASS | PASS | PASS |
 | 2.1 | stdio preferred for local, single-user servers | N/A | N/A | N/A | N/A |
 | 2.2 | TLS required, plaintext disallowed | PASS | PASS | **FAIL** | PASS |
-| 2.3 | Auth enforced and propagates through proxies | N/A | PASS | PASS | PASS |
-| 2.4 | Routing headers present, mismatch rejected | NO-REV | NO-REV | NO-REV | NO-REV |
+| 2.3 | Auth propagates through proxies on SSE responses | N/A | MANUAL | MANUAL | MANUAL |
+| 2.4 | Request metadata headers present and consistent | NO-REV | NO-REV | NO-REV | NO-REV |
 | 2.5 | Origin validated on all requests | **FAIL** | **FAIL** | PASS | **FAIL** |
 
 ### Reading the results
