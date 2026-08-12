@@ -115,8 +115,7 @@ never implies coverage we do not have.
 
 ## Ticket candidates (issues found while reviewing the checks)
 
-See [section2-tickets.md](section2-tickets.md) for the detailed write-ups. In
-summary:
+Detailed write-ups are kept outside this repository. In summary:
 
 1. **2.2 Description contains rewrite notes** instead of a description of the
    control.
