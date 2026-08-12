@@ -268,10 +268,15 @@ class RoutingHeadersRequired(Check):
         if not ctx.endpoint_url:
             return self._error("no endpoint to test against")
         if not ctx.rc_supported:
-            return self._unknown(
-                f"routing headers and -32020 HeaderMismatch are {RC_VERSION} "
-                f"features; server negotiates "
-                f"{ctx.rc_negotiated_version or ctx.negotiated_version or 'unknown'}"
+            negotiated = (
+                ctx.rc_negotiated_version or ctx.negotiated_version or "unknown"
+            )
+            return self._revision_unsupported(
+                f"routing headers and -32020 HeaderMismatch exist only in "
+                f"{RC_VERSION}. Server negotiated {negotiated}, so the mechanism "
+                f"is absent and there is nothing to test.",
+                required_revision=RC_VERSION,
+                negotiated_revision=negotiated,
             )
 
         # (a) A request missing the required Mcp-Method routing header.

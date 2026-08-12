@@ -25,6 +25,10 @@ class Status(str, Enum):
     FAIL = "FAIL"
     NOT_APPLICABLE = "NOT_APPLICABLE"  # recommendation doesn't apply to this server
     MANUAL = "MANUAL"  # needs human judgement; can't be decided by probing alone
+    # The check tests a mechanism that exists only in the target revision, and
+    # the server won't negotiate it. Distinct from UNKNOWN: nothing about this
+    # run can be improved, the server has to adopt the revision first.
+    REVISION_UNSUPPORTED = "REVISION_UNSUPPORTED"
     UNKNOWN = "UNKNOWN"  # couldn't decide this run (e.g. no baseline, no event in time)
     ERROR = "ERROR"  # the probe itself failed to reach a verdict
 
@@ -103,6 +107,9 @@ class Check:
 
     def _unknown(self, evidence: str, **details: Any) -> CheckResult:
         return self._make(Status.UNKNOWN, evidence, **details)
+
+    def _revision_unsupported(self, evidence: str, **details: Any) -> CheckResult:
+        return self._make(Status.REVISION_UNSUPPORTED, evidence, **details)
 
     def _error(self, evidence: str, **details: Any) -> CheckResult:
         return self._make(Status.ERROR, evidence, **details)
