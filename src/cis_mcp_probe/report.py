@@ -113,7 +113,12 @@ def render_check_report(runs: list[ProbeRun]) -> str:
         return f"{domain} [{versions.get(domain, '?')}]"
 
     lines = ["", "=" * 72, "Per-check validation across servers", "=" * 72]
-    lines.append("Each server is annotated with the protocol revision it negotiated.")
+    # Lead with the negotiated revision: every verdict below must be read
+    # against the revision the server actually speaks.
+    lines.append(
+        "Negotiated revision: "
+        + ", ".join(f"{d} [{versions[d]}]" for d in sorted(versions))
+    )
     for entry in agg:
         servers: dict[str, CheckResult] = entry["servers"]
         buckets = _counts(servers)
