@@ -162,16 +162,21 @@ credential and once with the cached bearer token. The unauthenticated request
 must be refused, the authenticated one accepted, and the probe reads the response
 `Content-Type` to see whether the reply was an SSE stream.
 
-**Why this reports MANUAL rather than PASS.** The benchmark states that a wire
-status code observed at the proxy is insufficient evidence of per-hop
-enforcement, because a proxy can authenticate, strip the credential, and forward
-an unauthenticated request that the backend answers successfully. Confirming
-arrival at the final upstream needs backend-side evidence: an access-log entry
-recording the credential or a derived identity, or per-hop trace data. The probe
-therefore decides only the wire part and reports MANUAL with that evidence.
+**Verdicts.** `PASS` when the unauthenticated request is refused and the
+authenticated one is accepted with an SSE-framed response. That is what the
+benchmark's own audit prints PASS for. `FAIL` when an unauthenticated request is
+accepted — no proxy topology makes that compliant. `UNKNOWN` when the server
+answers the authenticated request with a non-streamed response, since the
+SSE-specific assertion was then never exercised and a re-run against a streaming
+tool could decide it.
 
-`FAIL` is still reported when an unauthenticated request is *accepted*. No proxy
-topology makes that compliant.
+**Reduction: per-hop forwarding is not verified.** The benchmark notes that a
+wire status code observed at the proxy does not prove the credential reached the
+final upstream, because a proxy can authenticate, strip the credential, and
+forward an unauthenticated request that the backend answers successfully.
+Confirming arrival needs backend-side evidence: an access-log entry recording the
+credential or a derived identity, or per-hop trace data. The probe states this
+caveat in its evidence on every run rather than downgrading the verdict.
 
 **Reduction.** The benchmark audit invokes a server-specific safe streaming tool.
 That name is not discoverable from outside, and invoking a guessed tool against a
@@ -281,7 +286,7 @@ above.
 | 1.4 | Server exposes non-empty serverInfo | PASS | PASS | PASS | PASS |
 | 2.1 | stdio preferred for local, single-user servers | N/A | N/A | N/A | N/A |
 | 2.2 | TLS required, plaintext disallowed | PASS | PASS | **FAIL** | PASS |
-| 2.3 | Auth propagates through proxies on SSE responses | N/A | MANUAL | MANUAL | MANUAL |
+| 2.3 | Auth propagates through proxies on SSE responses | N/A | PASS | PASS | UNKNOWN |
 | 2.4 | Request metadata headers present and consistent | NO-REV | NO-REV | NO-REV | NO-REV |
 | 2.5 | Origin validated on all requests | **FAIL** | **FAIL** | PASS | **FAIL** |
 
@@ -301,9 +306,11 @@ above.
   `ECDHE-RSA-AES128-SHA` on the TLS 1.0 handshake. The other three refuse both
   legacy revisions, which shows the sub-test discriminates rather than passing
   everything.
-- **2.3 — 3/3 pass** on the servers that require authentication. All refuse the
-  unauthenticated request with 401 and accept the authenticated one with 200.
-  Linear and Sentry stream the response, Stripe returns plain JSON.
+- **2.3 — 2/2 decided pass.** All three auth servers refuse the unauthenticated
+  request with 401 and accept the authenticated one with 200. Linear and Sentry
+  return `text/event-stream`, so the SSE assertion was exercised and both pass.
+  Stripe answers with plain JSON, so that assertion could not be exercised and
+  the verdict is UNKNOWN rather than a pass.
 - **2.4 — `NO-REV` everywhere.** No live server negotiates 2026-07-28, so the
   routing headers and the `-32020` error do not exist to test. These verdicts
   will resolve on their own as servers adopt the revision.

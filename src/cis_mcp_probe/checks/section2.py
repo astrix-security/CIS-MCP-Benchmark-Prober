@@ -10,12 +10,13 @@ Scope reasoning — what a black-box client can and cannot decide:
         nothing to decide remotely: reported NOT_APPLICABLE.
 * 2.2 - fully decidable. Plaintext behaviour, weak-TLS refusal and certificate
         validity are all observable from outside.
-* 2.3 - Manual in the benchmark, and rightly so: the recommendation asserts
-        enforcement at *every* hop, and the benchmark states that a wire status
-        code at the proxy is insufficient evidence, because a proxy can
-        authenticate, strip the credential, and forward an unauthenticated
-        request the backend answers anyway. We decide the wire part and report
-        MANUAL, reserving FAIL for an unauthenticated request that is accepted.
+* 2.3 - the wire test is decidable: an unauthenticated request must be refused
+        and the authenticated one accepted with an SSE-framed response. That is
+        what the benchmark's own audit prints PASS for, so we do too. Per-hop
+        forwarding is not decidable from outside -- the benchmark notes a proxy
+        can authenticate, strip the credential, and forward an unauthenticated
+        request the backend answers anyway -- so it stays a caveat in the
+        evidence rather than downgrading the verdict.
 * 2.4 - decidable on the wire, but the metadata headers and the -32020
         HeaderMismatch error only exist in 2026-07-28. Against a server that
         won't negotiate that revision the check reports REVISION_UNSUPPORTED.
@@ -307,20 +308,25 @@ class AuthPropagatesThroughProxies(Check):
                 **details,
             )
 
-        # The wire part holds. The recommendation still asserts enforcement at
-        # every hop, and the benchmark states the wire status at the proxy is
-        # insufficient evidence for that, so the verdict stays MANUAL.
+        # The response must actually be a stream for the SSE-specific assertion
+        # to have been exercised. The benchmark calls this case REVIEW and says
+        # to re-run against a tool that streams, which is a run that could
+        # decide next time: UNKNOWN, not a failure.
         if not streamed:
-            return self._manual(
+            return self._unknown(
                 base + "; the server chose a non-streamed response, so the "
-                "SSE-specific assertion could not be exercised. Per-hop "
-                "enforcement needs backend-side evidence",
+                "SSE-specific assertion could not be exercised. Re-run against "
+                "a tool or condition that yields a streamed response",
                 **details,
             )
-        return self._manual(
+        # Wire test satisfied. Per-hop enforcement is not decidable from here,
+        # so it stays in the evidence as a caveat rather than downgrading the
+        # verdict -- the same convention every other reduced check uses.
+        return self._pass(
             base + "; authentication is enforced before the SSE stream is "
-            "established. Per-hop enforcement needs backend-side evidence "
-            "(access log recording the credential or a derived identity)",
+            "established. Per-hop forwarding is not verified: confirm the final "
+            "upstream with backend-side evidence (an access log recording the "
+            "credential or a derived identity)",
             **details,
         )
 
