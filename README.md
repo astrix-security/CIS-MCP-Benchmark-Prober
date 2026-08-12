@@ -32,7 +32,7 @@ decide automatically — see [Scope & limitations](#scope--limitations).
 - Runs the Section 1 checks and prints a per-check report across all servers, as
   text or JSON.
 
-## Section 1 checks implemented
+## Checks implemented
 
 | Check | Level | What the probe does |
 |-------|-------|---------------------|
@@ -40,6 +40,14 @@ decide automatically — see [Scope & limitations](#scope--limitations).
 | 1.2 | L1 | Compares advertised capabilities and tool/resource/prompt names against a baseline we record ourselves per server URL. New items are flagged as drift. Capture/refresh with `--update-baseline`. |
 | 1.3 | L2 | Waits briefly for a `listChanged` event, then tries to invoke the newly added tool. Reports UNKNOWN if no event arrives in time. |
 | 1.4 | L1 | Confirms the server exposes non-empty `serverInfo` (name/version). |
+| 2.1 | L2 | Reports N/A: the audit is a host-side transport inventory plus a registry lookup, and a server reached by domain is a network transport by definition. |
+| 2.2 | L1 | Confirms plaintext HTTP isn't served, that TLS 1.0/1.1 are refused while 1.2+ is accepted, and that the certificate is currently valid. |
+| 2.3 | L1 | Confirms an unauthenticated request is refused and the same request with a credential is accepted. Per-proxy-hop forwarding needs proxy logs and is reported as operator-side. |
+| 2.4 | L1 | Confirms a request missing `Mcp-Method` is rejected, and that a header/body mismatch is rejected with `-32020`. 2026-07-28 only, so reports NO-REV against older servers. |
+| 2.5 | L1 | Sends a hostile `Origin` with no preceding `OPTIONS` and confirms it's refused with 403. |
+
+See [docs/checks.md](docs/checks.md) for what each check requires, how it's
+implemented, and what was reduced to fit a black-box probe.
 
 ## Install
 
@@ -81,24 +89,31 @@ Targets probed: 4
 
 ## Results so far
 
-Across five well-known servers (Notion, DeepWiki, Linear, Sentry, Stripe),
-**none pass 1.1 as written** — they either accept an absent protocol version, or
-(Stripe) accept a bogus one too. All four reachable servers expose a proper
-`serverInfo` (1.4). The full write-up, including the ticket-worthy issues we
-found in the check text and audit scripts, is in
-[docs/section1-findings.md](docs/section1-findings.md).
+Across four reachable servers (DeepWiki, Linear, Sentry, Stripe), **none pass
+1.1 as written** — they either accept an absent protocol version, or (Stripe)
+accept a bogus one too. All four expose a proper `serverInfo` (1.4). Only one of
+four validates the `Origin` header (2.5), and one serves plaintext HTTP while
+accepting TLS 1.0/1.1 (2.2).
+
+Every check, how it is implemented, what was reduced for a black-box probe, and
+the full per-server results are in [docs/checks.md](docs/checks.md).
 
 ## Scope & limitations
 
 - **Black-box only.** It can't see operator-side artifacts (audit logs,
-  enterprise registry, approved-capability baselines). Benchmark checks that
-  depend on those are reduced to their externally observable part or reported
-  UNKNOWN/MANUAL.
+  enterprise registry, approved-capability baselines, host process inventory).
+  Benchmark checks that depend on those are reduced to their externally
+  observable part, or reported N/A / UNKNOWN / MANUAL.
 - **Streamable HTTP only.** SSE-only servers won't establish a session yet.
 - **Endpoint discovery** tries `/mcp` and `/`, not arbitrary paths (e.g.
   Atlassian's `/v1/...`).
-- **2026-07-28 is a release candidate** with no live server speaking it yet, so
-  RC-specific behavior is detected but not yet exercisable in practice.
+- **2026-07-28 is a release candidate** with no live server speaking it yet.
+  Checks that test a mechanism unique to it report `NO-REV`, a verdict distinct
+  from `UNKNOWN`: it can't be resolved by re-running, only by the server
+  adopting the revision.
+- **TLS interception breaks transport checks.** Behind an inspecting proxy the
+  certificate and negotiated TLS version belong to the proxy, not the server.
+  Check the certificate issuer before trusting a 2.2 result.
 
 ## Repository layout
 
@@ -115,15 +130,18 @@ src/cis_mcp_probe/
   checks/
     base.py       Check base class, results, statuses, registry
     section1.py   checks 1.1–1.4
+    section2.py   checks 2.1–2.5
 docs/
-  section1-findings.md   review findings + empirical results
-benchmark/        draft CIS benchmark source (git-ignored, confidential)
+  checks.md       what each check tests, how it's implemented, per-server results
+benchmark/        draft CIS benchmark source and working notes
+                  (git-ignored, confidential)
 ```
 
 ## Status
 
-Section 1 checks 1.1–1.4 implemented and validated against live servers. More
-checks and sections are added as the benchmark draft progresses.
+Section 1 checks 1.1–1.4 and Section 2 checks 2.1–2.5 implemented and validated
+against live servers. More checks and sections are added as the benchmark draft
+progresses.
 
 ## License
 

@@ -1,0 +1,315 @@
+# Implemented checks
+
+What each check tests, how this probe implements it, and how the servers we
+tested held up.
+
+The probe is an external, black-box client: it sees only what any client
+connecting to the server by domain can see. Where a benchmark check depends on
+operator-side artifacts — audit logs, an enterprise registry, host process
+inventory — only the externally observable part is implemented, and the rest is
+reported rather than guessed at. Each check's reduction is stated below and
+repeated in the evidence string at runtime, so a report never implies coverage
+that was not achieved.
+
+## Verdicts
+
+| Verdict | Meaning |
+|---------|---------|
+| `PASS` | The server satisfied the externally observable part of the check. |
+| `FAIL` | The server did not satisfy it. |
+| `N/A` | The check does not apply to this server, or is operator-side only. |
+| `NO-REV` | The check tests a mechanism that exists only in a protocol revision this server does not negotiate. Nothing about the run can change this. |
+| `UNKNOWN` | This run could not decide, and a later run might. No baseline recorded yet, or no event arrived inside the wait window. |
+| `MANUAL` | Needs human judgement. |
+| `ERROR` | The probe itself failed to reach a verdict. |
+
+`NO-REV` and `UNKNOWN` are deliberately distinct. `UNKNOWN` is a property of the
+run. `NO-REV` is a property of the server, and it clears only when the server
+adopts the revision.
+
+## Section 1 — protocol and capability integrity
+
+### 1.1 Unapproved or absent protocol version is rejected
+
+**Level:** L1
+
+**What the check requires.** The server must reject a request whose asserted
+protocol version is absent or outside the approved allowlist, instead of falling
+back to a default revision.
+
+**How the probe implements it.** Two requests per server: one asserting a bogus
+version (`2024-01-01`), one asserting none. Both must be rejected.
+
+The mechanism for asserting the version differs by revision, so the probe
+detects which the server speaks and adapts:
+
+- 2026-07-28 — per-request `_meta` field `io.modelcontextprotocol/protocolVersion`
+- 2025-11-25 and earlier — the `MCP-Protocol-Version` HTTP header
+
+**Reduction.** The benchmark also requires the version to be logged. Log
+inspection is operator-side, so only the rejection half is implemented.
+
+### 1.2 Advertised capabilities match the recorded baseline
+
+**Level:** L1
+
+**What the check requires.** Advertised capabilities must not grow without
+review. New capabilities are unauthorized drift.
+
+**How the probe implements it.** Capabilities and the tool, resource and prompt
+inventory are captured from the `initialize` result and the `*/list` methods,
+then compared against a baseline stored per endpoint URL under
+`~/.cis-mcp-probe/`. Capture or refresh it with `--update-baseline`.
+
+**Reduction.** The benchmark expects an operator-maintained approved-capability
+baseline. The probe has no access to one, so it records its own and reports drift
+relative to that. Until a baseline exists for a server, the verdict is `UNKNOWN`.
+
+### 1.3 Capabilities added via listChanged are not silently invocable
+
+**Level:** L2
+
+**What the check requires.** A capability newly advertised through a
+`listChanged` notification must be held pending re-approval, not immediately
+invocable.
+
+**How the probe implements it.** Waits briefly for a `listChanged` notification,
+re-lists tools to identify what was added, then attempts to invoke the new tool.
+Reaching the tool means it was invocable without re-approval, which is a failure.
+A JSON-RPC `-32602` invalid-params error counts as reaching the tool, because the
+server had to resolve the tool name and validate arguments to produce it.
+
+**Reduction.** The MCP specification does not define which error code a
+conforming server returns when it denies a pending capability. The probe
+therefore treats any other error as a probable denial and says so in the
+evidence, so a reviewer can confirm it was an authorization denial rather than
+method-not-found. If no notification arrives inside the window, the verdict is
+`UNKNOWN`.
+
+### 1.4 Server exposes non-empty identity metadata
+
+**Level:** L1
+
+**What the check requires.** The server identity must be capturable and
+validatable against an asset inventory.
+
+**How the probe implements it.** Confirms the `initialize` result carries a
+non-empty `serverInfo.name`, and records the version.
+
+**Reduction.** Reconciling that identity against an enterprise inventory is
+operator-side. Only the externally observable half — that the server asserts an
+identity at all — is implemented.
+
+## Section 2 — transport security
+
+### 2.1 stdio is preferred for local, single-user servers
+
+**Level:** L2 (provisional)
+
+**What the check requires.** Local and single-user deployments should use the
+stdio transport. Every server on a network transport needs a documented
+operational justification in the enterprise registry.
+
+**How the probe implements it.** It does not, and reports `N/A` with the detected
+transport as evidence.
+
+**Why.** Both halves are outside a remote client's view. The transport inventory
+needs host access to enumerate service units and listening sockets, and the
+justification lives in the registry. The check is also self-defeating remotely:
+any server reached by domain is a network transport by construction, so the
+answer would be predetermined.
+
+### 2.2 TLS is required and plaintext is disallowed
+
+**Level:** L1 (provisional)
+
+**What the check requires.** The server must not serve plaintext HTTP, must
+refuse TLS 1.0 and TLS 1.1 while accepting TLS 1.2 and above, and must present a
+currently valid certificate.
+
+**How the probe implements it.** Three sub-tests, aggregated into one verdict.
+Any failing sub-test fails the check, and every sub-result is kept in the JSON
+`details`.
+
+- **Plaintext.** A `GET http://host/` without following redirects. A 200 fails. A
+  3xx or a refused connection passes. Redirects are deliberately not followed,
+  because following one would hide a compliant 3xx behind a final 200.
+- **Weak TLS.** One handshake per legacy revision, pinned so that minimum equals
+  maximum, so the server cannot negotiate upward. A completed handshake means the
+  server accepted that revision, which fails.
+- **Certificate.** Expiry parsed from the chain observed during the main
+  handshake, reported as days remaining.
+
+**Implementation note.** The weak-TLS sub-test sets the client cipher string to
+`DEFAULT@SECLEVEL=0`. Modern OpenSSL refuses to *offer* TLS 1.0 and 1.1 by
+default. Without lowering the level, the handshake fails inside our own client
+and is indistinguishable from the server refusing, which would make the check
+pass against every server. With it, a failure is attributable to the server.
+
+### 2.3 Authentication is enforced and propagates through proxies
+
+**Level:** L1 (provisional)
+
+**What the check requires.** Authentication must be enforced before a
+request-scoped response stream is established, and the credential must reach the
+upstream server through every proxy hop.
+
+**How the probe implements it.** Sends the same request twice, once without a
+credential and once with the cached bearer token. The unauthenticated request
+must be refused and the authenticated one accepted. The probe also records
+whether the response came back SSE-framed or as plain JSON.
+
+**Reductions.**
+
+- The benchmark audit invokes a server-specific safe streaming tool. That name is
+  not discoverable from outside, and invoking a guessed tool against a production
+  server has side effects. The probe uses `tools/list`, which exercises the same
+  authentication path without them. The cost is that the response is not
+  guaranteed to be streamed, so the streaming-specific aspect is observed and
+  reported rather than forced.
+- Per-proxy-hop forwarding is not verified. The benchmark's own method for it is
+  to inspect each proxy's access log, which is operator-side. The evidence string
+  says so on every run.
+
+A server that requires no authentication reports `N/A`, since there is no
+credential to enforce.
+
+### 2.4 Routing headers are present and header/body mismatch is rejected
+
+**Level:** L1 (provisional)
+
+**What the check requires.** Under 2026-07-28, every Streamable HTTP request must
+carry the `Mcp-Method` and `Mcp-Name` routing headers, and the server must reject
+any request whose headers contradict the JSON-RPC body. This lets gateways route
+without inspecting the body, and refuses header/body mismatch as a
+request-smuggling vector.
+
+**How the probe implements it.** Two sub-tests, both required to pass.
+
+- A request omitting `Mcp-Method` must be rejected with HTTP 400.
+- A request whose `Mcp-Name` header names one tool while the body names another
+  must be rejected with HTTP 400 and JSON-RPC error `-32020` (HeaderMismatch).
+
+**Revision gate.** Both the routing headers and the `-32020` code exist only in
+2026-07-28. Against a server that will not negotiate that revision the probe
+returns `NO-REV` and records both the required and the negotiated revision,
+rather than reporting a failure for a mechanism that is simply absent.
+
+### 2.5 Origin header is validated on all requests
+
+**Level:** L1 (provisional)
+
+**What the check requires.** The server must validate `Origin` on every request
+and refuse any Origin not on an operator-configured allowlist, returning HTTP
+403. Enforcement must apply to the request itself, not only to a CORS preflight.
+
+**How the probe implements it.** Sends a POST carrying
+`Origin: http://evil.example.com` with no preceding `OPTIONS` request, so the
+test exercises the request path rather than a preflight. An exact 403 passes.
+
+The probe attaches the bearer token when it has one. On a server that requires
+authentication, an unauthenticated probe returns 401 for every Origin, which
+would hide whether Origin is validated at all.
+
+**Reduction.** The allowlist is operator-configured and not externally
+discoverable, so the benchmark's allowed-Origin comparison cannot be reproduced
+exactly. The probe substitutes the server's own origin and says so in the
+evidence. The security-relevant direction, that a hostile Origin is refused, is
+fully decided. If the hostile Origin is correctly refused but the stand-in is
+also refused, the verdict is `UNKNOWN` rather than a claimed pass.
+
+A refusal with a status other than 403 fails, but the evidence notes that the
+refusal may not be an Origin decision, so a reviewer can tell the two apart.
+
+## Results against tested servers
+
+Probed on 2026-08-12 against hosted MCP servers, using the checks as described
+above.
+
+| Server | Endpoint | Auth | Protocol negotiated |
+|--------|----------|------|---------------------|
+| DeepWiki | `mcp.deepwiki.com` | none | 2025-11-25 |
+| Linear | `mcp.linear.app` | OAuth | 2025-11-25 |
+| Sentry | `mcp.sentry.dev` | OAuth | 2025-11-25 |
+| Stripe | `mcp.stripe.com` | OAuth | 2025-03-26 |
+
+| # | Check | deepwiki | linear | sentry | stripe |
+|---|---|---|---|---|---|
+| — | **Negotiated revision** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-03-26** |
+| 1.1 | Unapproved or absent protocol version rejected | FAIL | FAIL | FAIL | FAIL |
+| 1.2 | Capabilities match recorded baseline | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+| 1.3 | listChanged capabilities not silently invocable | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+| 1.4 | Server exposes non-empty serverInfo | PASS | PASS | PASS | PASS |
+| 2.1 | stdio preferred for local, single-user servers | N/A | N/A | N/A | N/A |
+| 2.2 | TLS required, plaintext disallowed | PASS | PASS | **FAIL** | PASS |
+| 2.3 | Auth enforced and propagates through proxies | N/A | PASS | PASS | PASS |
+| 2.4 | Routing headers present, mismatch rejected | NO-REV | NO-REV | NO-REV | NO-REV |
+| 2.5 | Origin validated on all requests | **FAIL** | **FAIL** | PASS | **FAIL** |
+
+### Reading the results
+
+- **1.1 — 0/4 pass.** Every server accepts a request with the protocol version
+  absent and defaults it. Three reject a bogus version. Stripe, on the older
+  2025-03-26 revision, accepts a bogus version too, so it does not validate the
+  version at all.
+- **1.2 and 1.3 — undecided.** 1.2 had no baseline recorded for these servers.
+  1.3 saw no `listChanged` notification inside the wait window, so there was
+  nothing to test.
+- **1.4 — 4/4 pass.** Every server asserts a name and version.
+- **2.2 — 3/4 pass.** Plaintext handling differs on every server: DeepWiki
+  refuses the port, Linear answers 403, Stripe redirects with 301, Sentry serves
+  content with 200. Sentry also negotiates TLS 1.0 and TLS 1.1, with cipher
+  `ECDHE-RSA-AES128-SHA` on the TLS 1.0 handshake. The other three refuse both
+  legacy revisions, which shows the sub-test discriminates rather than passing
+  everything.
+- **2.3 — 3/3 pass** on the servers that require authentication. All refuse the
+  unauthenticated request with 401 and accept the authenticated one with 200.
+  Linear and Sentry stream the response, Stripe returns plain JSON.
+- **2.4 — `NO-REV` everywhere.** No live server negotiates 2026-07-28, so the
+  routing headers and the `-32020` error do not exist to test. These verdicts
+  will resolve on their own as servers adopt the revision.
+- **2.5 — 1/4 pass.** DeepWiki, Linear and Stripe all accept
+  `Origin: http://evil.example.com` and answer 200. Sentry is the only server
+  that returns 403.
+
+Sentry is the inverse of the other three: the only server that validates Origin,
+and the only one that serves plaintext HTTP and accepts legacy TLS. No server
+passes both 2.2 and 2.5.
+
+### Detail per check
+
+**2.2 TLS and plaintext**
+
+| Server | Plaintext `http://` | TLS 1.0 / 1.1 | Negotiated | Cert expires in |
+|--------|---------------------|---------------|------------|-----------------|
+| DeepWiki | port refused | refused | TLSv1.3 | 83d |
+| Linear | 403 | refused | TLSv1.3 | 65d |
+| Sentry | **200 served** | **both accepted** | TLSv1.3 | 69d |
+| Stripe | 301 redirect | refused | TLSv1.3 | 50d |
+
+**2.3 Authentication**
+
+| Server | Unauthenticated | Authenticated | Response framing |
+|--------|-----------------|---------------|------------------|
+| DeepWiki | n/a (no auth) | n/a | n/a |
+| Linear | 401 | 200 | SSE |
+| Sentry | 401 | 200 | SSE |
+| Stripe | 401 | 200 | plain JSON |
+
+**2.5 Origin**
+
+| Server | Hostile Origin | Own origin (stand-in) | Verdict |
+|--------|----------------|------------------------|---------|
+| DeepWiki | 200 | 200 | FAIL |
+| Linear | 200 | 200 | FAIL |
+| Sentry | **403** | 200 | PASS |
+| Stripe | 200 | 200 | FAIL |
+
+### Servers not covered
+
+- **Notion** (`mcp.notion.com`) could not be probed. During testing the host was
+  reached through a TLS inspection proxy, so the certificate chain presented was
+  not Notion's. Any transport verdict would have described the proxy rather than
+  the server, so it is excluded rather than reported.
+- **Atlassian** exposes its endpoint under `/v1/...`, which the probe's endpoint
+  discovery does not try.
