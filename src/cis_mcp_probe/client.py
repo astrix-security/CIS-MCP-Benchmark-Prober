@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import warnings
 from urllib.parse import urlparse
 
 import anyio
@@ -77,6 +78,72 @@ def _tls_sync(host: str, port: int = 443) -> HttpObservation:
 
 async def _observe_tls(ctx: ProbeContext, host: str) -> None:
     ctx.http["tls"] = await anyio.to_thread.run_sync(_tls_sync, host)
+
+
+# Legacy revisions we must confirm the server *refuses* (check 2.2).
+WEAK_TLS_VERSIONS = ("TLSv1", "TLSv1_1")
+
+
+def _tls_version_sync(host: str, version_name: str, port: int = 443) -> HttpObservation:
+    """Try to complete a handshake pinned to exactly one TLS version.
+
+    ``status`` is 0 when the handshake succeeded (the server *accepted* that
+    revision) and ``error`` is set when it failed. We pin min==max so the
+    server can't negotiate up, and drop the client security level to 0 so a
+    modern OpenSSL will still *offer* TLS 1.0/1.1 — otherwise our own stack
+    would refuse locally and we'd misread that as the server refusing.
+    """
+    obs = HttpObservation(url=f"{host}:{port}", method=f"TLS:{version_name}")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            version = getattr(ssl.TLSVersion, version_name)
+        sslctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        # We're testing which revisions are on offer, not trust; a cert problem
+        # must not mask the handshake result.
+        sslctx.check_hostname = False
+        sslctx.verify_mode = ssl.CERT_NONE
+        sslctx.minimum_version = version
+        sslctx.maximum_version = version
+        try:
+            sslctx.set_ciphers("DEFAULT@SECLEVEL=0")
+        except ssl.SSLError:
+            pass  # older/stricter builds: proceed with defaults
+        with socket.create_connection((host, port), timeout=10) as sock:
+            with sslctx.wrap_socket(sock, server_hostname=host) as ssock:
+                obs.tls_version = ssock.version()
+                cipher = ssock.cipher()
+                obs.tls_cipher = cipher[0] if cipher else None
+                obs.status = 0  # handshake completed -> version accepted
+    except Exception as e:  # noqa: BLE001 — a failure here is the evidence
+        obs.error = repr(e)
+    return obs
+
+
+async def _observe_weak_tls(ctx: ProbeContext, host: str) -> None:
+    for name in WEAK_TLS_VERSIONS:
+        ctx.http[f"tls:{name}"] = await anyio.to_thread.run_sync(
+            _tls_version_sync, host, name
+        )
+
+
+async def _observe_plaintext(ctx: ProbeContext, host: str) -> None:
+    """GET http:// (no TLS) to see whether plaintext is served (check 2.2).
+
+    Redirects are NOT followed: a 3xx to https is the compliant answer, and
+    following it would hide the redirect behind the final 200.
+    """
+    url = f"http://{host}/"
+    obs = HttpObservation(url=url, method="GET")
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=10.0) as http:
+            resp = await http.get(url)
+        obs.status = resp.status_code
+        obs.headers = dict(resp.headers)
+        obs.body_snippet = resp.text[:200]
+    except Exception as e:  # noqa: BLE001 — connection refused is a PASS signal
+        obs.error = repr(e)
+    ctx.http["plaintext"] = obs
 
 
 def _initialize_body() -> dict:
@@ -273,6 +340,8 @@ async def connect_and_probe(
     # --- Transport-level evidence (no MCP session needed) ---
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as http:
         await _observe_tls(ctx, host)
+        await _observe_weak_tls(ctx, host)
+        await _observe_plaintext(ctx, host)
         endpoint, auth_required = await _detect_endpoint(ctx, http, candidates)
         ctx.endpoint_url = endpoint
         ctx.auth_required = auth_required

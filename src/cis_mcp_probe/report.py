@@ -23,7 +23,7 @@ _MARK = {
     Status.PASS: "PASS",
     Status.FAIL: "FAIL",
     Status.NOT_APPLICABLE: "N/A",
-    Status.MANUAL: "MANUAL",
+    Status.REVISION_UNSUPPORTED: "NO-REV",
     Status.UNKNOWN: "UNKNOWN",
     Status.ERROR: "ERROR",
 }
@@ -32,7 +32,7 @@ _MARK = {
 _ORDER = [
     Status.PASS,
     Status.FAIL,
-    Status.MANUAL,
+    Status.REVISION_UNSUPPORTED,
     Status.UNKNOWN,
     Status.NOT_APPLICABLE,
     Status.ERROR,
@@ -93,18 +93,39 @@ def render_servers_summary(runs: list[ProbeRun]) -> str:
     return "\n".join(lines)
 
 
+def _version_map(runs: list[ProbeRun]) -> dict[str, str]:
+    """domain -> negotiated protocol revision, for annotating every verdict."""
+    return {
+        run.ctx.domain: (run.ctx.negotiated_version or "no-session") for run in runs
+    }
+
+
 def render_check_report(runs: list[ProbeRun]) -> str:
     agg = _aggregate(runs)
     if not agg:
         return "\n(no checks registered — connection/enumeration only)\n"
 
+    versions = _version_map(runs)
+
+    def label(domain: str) -> str:
+        return f"{domain} [{versions.get(domain, '?')}]"
+
     lines = ["", "=" * 72, "Per-check validation across servers", "=" * 72]
+    # Lead with the negotiated revision: every verdict below must be read
+    # against the revision the server actually speaks.
+    lines.append(
+        "Negotiated revision: "
+        + ", ".join(f"{d} [{versions[d]}]" for d in sorted(versions))
+    )
     for entry in agg:
         servers: dict[str, CheckResult] = entry["servers"]
         buckets = _counts(servers)
         n_pass, n_fail = len(buckets[Status.PASS]), len(buckets[Status.FAIL])
         decidable = n_pass + n_fail
         rate = f"{n_pass}/{decidable} pass" if decidable else "no pass/fail decisions"
+        n_norev = len(buckets[Status.REVISION_UNSUPPORTED])
+        if n_norev:
+            rate += f", {n_norev} lack the required revision"
 
         lines.append("")
         lines.append(
@@ -113,12 +134,15 @@ def render_check_report(runs: list[ProbeRun]) -> str:
         for status in _ORDER:
             domains = buckets[status]
             if domains:
-                lines.append(f"    {_MARK[status]:6s}: {', '.join(sorted(domains))}")
+                shown = ", ".join(label(d) for d in sorted(domains))
+                lines.append(f"    {_MARK[status]:7s}: {shown}")
         # Show one representative evidence line per failing server for context.
-        for domain in sorted(buckets[Status.FAIL]):
-            ev = servers[domain].evidence
-            if ev:
-                lines.append(f"      · {domain}: {ev}")
+        # REVISION_UNSUPPORTED gets one too: it explains which revision is missing.
+        for status in (Status.FAIL, Status.REVISION_UNSUPPORTED):
+            for domain in sorted(buckets[status]):
+                ev = servers[domain].evidence
+                if ev:
+                    lines.append(f"      · {domain}: {ev}")
     lines.append("")
     return "\n".join(lines)
 
@@ -129,6 +153,7 @@ def render_report(runs: list[ProbeRun]) -> str:
 
 def to_json(runs: list[ProbeRun]) -> str:
     agg = _aggregate(runs)
+    versions = _version_map(runs)
     checks_json = []
     for entry in agg:
         servers: dict[str, CheckResult] = entry["servers"]
@@ -139,12 +164,13 @@ def to_json(runs: list[ProbeRun]) -> str:
                 "title": entry["title"],
                 "section": entry["section"],
                 "level": entry["level"],
-                "summary": {
-                    _MARK[s].lower().replace("/", "a"): len(buckets[s]) for s in _ORDER
-                },
+                # Keyed by the status value itself so a new status can't collide
+                # with another after case-folding.
+                "summary": {s.value: len(buckets[s]) for s in _ORDER},
                 "servers": {
                     domain: {
                         "status": r.status.value,
+                        "negotiated_version": versions.get(domain),
                         "evidence": r.evidence,
                         "remediation": r.remediation,
                         "details": r.details,
