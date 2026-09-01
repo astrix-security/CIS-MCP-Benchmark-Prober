@@ -11,3 +11,10 @@ wheels/
 
 # CIS benchmark source PDFs (draft/confidential — do not commit)
 /benchmark/
+
+# Benchmark spreadsheets, wherever they land. Draft revisions arrive as .xlsx in
+# the repository root, which /benchmark/ does not cover.
+*.xlsx
+
+# Local worktrees for feature branches
+.worktrees/

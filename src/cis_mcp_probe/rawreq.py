@@ -6,6 +6,12 @@ version, a direct tool call, an initialize offering a specific revision). This
 helper does that, reusing the session's bearer token and session id, and copes
 with servers that answer a POST with a Server-Sent-Events stream instead of a
 plain JSON body.
+
+It also holds ``raw_get`` and ``raw_post_form``, the two helpers for reaching a
+URL outside the MCP endpoint's own origin. Those check the host guard before
+connecting and never follow a redirect; the JSON-RPC helpers above do follow
+redirects, because they post to the endpoint the probe was pointed at rather
+than to a URL the server chose.
 """
 
 from __future__ import annotations
@@ -14,6 +20,8 @@ import json
 from typing import Any
 
 import httpx
+
+from .netguard import is_safe_fetch_host, parts_of, verify_context
 
 
 def _extract_json(resp: httpx.Response) -> dict[str, Any] | None:
@@ -65,7 +73,9 @@ async def raw_jsonrpc(
     if extra_headers:
         headers.update(extra_headers)
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+    async with httpx.AsyncClient(
+        follow_redirects=True, timeout=timeout, verify=verify_context()
+    ) as client:
         resp = await client.post(endpoint, json=payload, headers=headers)
     return resp.status_code, _extract_json(resp), resp.text
 
@@ -99,13 +109,112 @@ async def raw_jsonrpc_headers(
     if extra_headers:
         headers.update(extra_headers)
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+    async with httpx.AsyncClient(
+        follow_redirects=True, timeout=timeout, verify=verify_context()
+    ) as client:
         resp = await client.post(endpoint, json=payload, headers=headers)
     return (
         resp.status_code,
         _extract_json(resp),
         resp.text,
         {k.lower(): v for k, v in resp.headers.items()},
+    )
+
+
+async def _guarded_fetch(
+    method: str,
+    url: str,
+    *,
+    token: str | None,
+    timeout: float,
+    data: dict[str, str] | None = None,
+    json_body: dict[str, Any] | None = None,
+) -> tuple[int | None, dict[str, str], str, str | None]:
+    """Fetch ``url`` if its host passes the guard, without following redirects.
+
+    Returns ``(status, lowercased_headers, text, error)``. ``status`` is None
+    exactly when ``error`` is set: ``"guard-refused"`` when the host was
+    rejected or the URL carried userinfo, and no request was made in either
+    case, otherwise the repr of the transport exception.
+
+    Pass ``data`` for a form body or ``json_body`` for a JSON one, never both.
+
+    Redirects are returned as they arrive. Check 3.5 presents a live bearer
+    token to a host derived from the endpoint's domain, so a followed redirect
+    would carry that token to a location the guard never saw.
+    """
+    if not is_safe_fetch_host(url):
+        return None, {}, "", "guard-refused"
+
+    parts = parts_of(url)
+    if parts is None or parts.username or parts.password:
+        # httpx builds a Basic-auth header from URL userinfo and that header
+        # replaces any Authorization header set below, silently dropping the
+        # bearer token a check meant to send. The host guard runs first, so an
+        # unparseable URL is already refused there rather than raising here.
+        return None, {}, "", "guard-refused"
+
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=timeout, verify=verify_context()
+        ) as client:
+            resp = await client.request(
+                method, url, headers=headers, data=data, json=json_body
+            )
+    except Exception as exc:  # a caller gets an error string, never a raise
+        return None, {}, "", repr(exc)
+
+    return (
+        resp.status_code,
+        {k.lower(): v for k, v in resp.headers.items()},
+        resp.text,
+        None,
+    )
+
+
+async def raw_get(
+    url: str,
+    *,
+    token: str | None = None,
+    timeout: float = 8.0,
+) -> tuple[int | None, dict[str, str], str, str | None]:
+    """GET a URL through the host guard, returning any redirect unresolved."""
+    return await _guarded_fetch("GET", url, token=token, timeout=timeout)
+
+
+async def raw_post_form(
+    url: str,
+    data: dict[str, str],
+    *,
+    token: str | None = None,
+    timeout: float = 8.0,
+) -> tuple[int | None, dict[str, str], str, str | None]:
+    """POST form-encoded ``data`` through the host guard, as ``raw_get`` does.
+
+    For a token request, where RFC 6749 section 4.1.3 requires
+    ``application/x-www-form-urlencoded``. A dynamic client registration is not
+    one of these: RFC 7591 section 3.1 requires JSON there, so it uses
+    ``raw_post_json``.
+    """
+    return await _guarded_fetch("POST", url, token=token, timeout=timeout, data=data)
+
+
+async def raw_post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    token: str | None = None,
+    timeout: float = 8.0,
+) -> tuple[int | None, dict[str, str], str, str | None]:
+    """POST ``payload`` as JSON through the host guard, as ``raw_get`` does.
+
+    For a dynamic client registration, where RFC 7591 section 3.1 requires the
+    request parameters in the entity body as ``application/json``. A conforming
+    authorization server answers 400 or 415 to a form body.
+    """
+    return await _guarded_fetch(
+        "POST", url, token=token, timeout=timeout, json_body=payload
     )
 
 
@@ -129,3 +238,67 @@ def is_rejection(status: int, data: dict[str, Any] | None) -> bool:
 def is_success(status: int, data: dict[str, Any] | None) -> bool:
     """True if the server accepted and answered the request."""
     return status == 200 and bool(data) and data.get("result") is not None
+
+
+if __name__ == "__main__":
+    import anyio
+
+    # A URL carrying userinfo must never reach httpx, through any of the three
+    # helpers that route through the guard. No server runs for this: the guard
+    # returns before a request is built.
+    for label, call in (
+        ("raw_get", lambda: raw_get("https://user@api.example.com/me")),
+        (
+            "raw_post_form",
+            lambda: raw_post_form("https://user@as.example.com/token", {"a": "b"}),
+        ),
+        (
+            "raw_post_json",
+            lambda: raw_post_json("https://user:pw@as.example.com/reg", {"a": 1}),
+        ),
+    ):
+        status, headers, text, error = anyio.run(call)
+        assert status is None and error == "guard-refused", (label, status, error)
+    # An unparseable URL is refused with the same marker, never raised. The host
+    # guard runs before the parse, which is what keeps this contract.
+    for _url in ("https://exa[mple.com/x", "https://[fd00/x"):
+        for _call in (
+            lambda u=_url: raw_get(u),
+            lambda u=_url: raw_post_form(u, {"a": "b"}),
+            lambda u=_url: raw_post_json(u, {"a": 1}),
+        ):
+            _s, _h, _t, _e = anyio.run(_call)
+            assert _s is None and _e == "guard-refused", (_url, _s, _e)
+
+    # The three response readers, against the rules their docstrings state. Check
+    # 3.5's audience leg decides on `is_rejection` for both the differently-bound
+    # token and its own control, so a wrong answer here is a wrong verdict on a
+    # credential path.
+    #
+    # A refusal is an HTTP status at or above 400, or a JSON-RPC error object at
+    # any status. A 200 carrying an error object is the case that matters: JSON-RPC
+    # carries application errors in the body, so status alone cannot decide.
+    assert is_rejection(401, None) is True
+    assert is_rejection(400, {"result": {}}) is True
+    assert is_rejection(200, {"error": {"code": -32600}}) is True
+    assert is_rejection(200, {"result": {"tools": []}}) is False
+    assert is_rejection(200, None) is False
+    # A non-object `error` is not an error object, so it decides nothing.
+    assert is_rejection(200, {"error": "boom"}) is False
+
+    # Success is narrower than "not a refusal": 200, a body, and a `result` member.
+    assert is_success(200, {"result": {"tools": []}}) is True
+    assert is_success(200, {"result": None}) is False
+    assert is_success(200, {"error": {"code": -32600}}) is False
+    assert is_success(204, {"result": {}}) is False
+    assert is_success(200, None) is False
+
+    # The error code is read only from an object, and only when it is an integer.
+    assert jsonrpc_error_code({"error": {"code": -32020}}) == -32020
+    assert jsonrpc_error_code({"error": {"code": "-32020"}}) is None
+    assert jsonrpc_error_code({"error": {}}) is None
+    assert jsonrpc_error_code({"error": "boom"}) is None
+    assert jsonrpc_error_code({"result": {}}) is None
+    assert jsonrpc_error_code(None) is None
+
+    print("rawreq: all self-checks passed")

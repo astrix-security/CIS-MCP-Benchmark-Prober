@@ -125,6 +125,24 @@ class TlsRequiredNoPlaintext(Check):
                 f"behaviour is not attributable to a served deployment"
             )
 
+        # Nothing here describes the server when something else terminated the TLS
+        # connection. The certificate and the negotiated version are the
+        # interceptor's, and the plaintext leg is unattributable too, because a
+        # proxy that upgrades the scheme hides what the server would have done.
+        if tls.tls_intercepted:
+            issuer = (tls.tls_cert or {}).get("issuer") or {}
+            named = issuer.get("commonName") or issuer.get("organizationName")
+            return self._unknown(
+                "this connection was terminated by a TLS-inspecting proxy, so the "
+                "certificate and the negotiated version belong to it rather than to "
+                f"the server (issuer: {named!r}). The chain verified against this "
+                "machine's trust store but not against the public CA set. Re-run "
+                "from a network without interception to decide this check",
+                tls_intercepted=True,
+                observed_issuer=issuer,
+                negotiated=tls.tls_version,
+            )
+
         failures: list[str] = []
         notes: list[str] = []
         details: dict[str, object] = {}
@@ -598,3 +616,62 @@ class OriginValidated(Check):
             "on the request itself)",
             **details,
         )
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    from ..context import HttpObservation
+    from .base import Status
+
+    # test-type: regression | source: live run 2026-09-01 against mcp.notion.com --
+    # the run reported "2.2 PASS, certificate valid for 2d" while the certificate
+    # belonged to the TLS-inspecting proxy that terminated the connection, not to
+    # the server. Two days is a lifetime no public CA issues.
+    #
+    # Nothing 2.2 measures describes the server once something else terminated the
+    # connection, so the check must decline to grade rather than pass the proxy.
+    PROXY_ISSUER = {
+        "organizationName": "Cisco",
+        "commonName": "Cisco Secure Access Secondary SubCA p-ilc111-SG",
+    }
+
+    def _tls_observation(intercepted: bool) -> HttpObservation:
+        return HttpObservation(
+            url="host:443",
+            method="TLS",
+            status=0,
+            tls_version="TLSv1.3",
+            tls_cert={"issuer": PROXY_ISSUER, "notAfter": "Sep  4 08:06:36 2026 GMT"},
+            tls_intercepted=intercepted,
+        )
+
+    def _run(intercepted: bool) -> CheckResult:
+        ctx = ProbeContext(
+            domain="host", base_url="https://host", endpoint_url="https://host/mcp"
+        )
+        ctx.http["tls"] = _tls_observation(intercepted)
+        ctx.http["plaintext"] = HttpObservation(
+            url="http://host/",
+            method="GET",
+            status=301,
+            headers={"location": "https://host/"},
+        )
+        return asyncio.run(TlsRequiredNoPlaintext().run(ctx))
+
+    intercepted_result = _run(True)
+    assert intercepted_result.status is Status.UNKNOWN, intercepted_result.status
+    # The operator has to be able to see WHICH authority signed it, or the verdict
+    # is unactionable.
+    assert "Cisco Secure Access" in intercepted_result.evidence, (
+        intercepted_result.evidence
+    )
+    assert intercepted_result.details["tls_intercepted"] is True
+
+    # The same observations, not intercepted, must reach the ordinary legs. The early
+    # return must fire on the flag alone and on nothing else about this fixture.
+    graded = _run(False)
+    assert graded.status is not Status.UNKNOWN, graded.status
+    assert "TLS-inspecting proxy" not in graded.evidence, graded.evidence
+
+    print("section2: all self-checks passed")

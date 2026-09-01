@@ -31,6 +31,10 @@ class HttpObservation:
     tls_version: str | None = None
     tls_cipher: str | None = None
     tls_cert: dict[str, Any] | None = None
+    # True when the chain verified against the system or environment trust store
+    # but NOT against the bundled public CA set. The certificate and the negotiated
+    # version then belong to whatever terminated the connection, not to the server.
+    tls_intercepted: bool = False
     error: str | None = None
     body_snippet: str | None = None
 
@@ -73,6 +77,19 @@ class ProbeContext:
     authenticated: bool = False
     protected_resource_metadata: dict[str, Any] | None = None
     auth_server_metadata: dict[str, Any] | None = None
+
+    # Section 3 — token lifetime/scope and OAuth discovery documents.
+    token_expires_in: int | None = None  # expires_in from the stored token response
+    token_scope: str | None = None  # scope from the stored token response
+    challenge_scope: str | None = None  # scope parsed from WWW-Authenticate
+    # resource_metadata URL named by the 401 challenge, when it named one. Leg 3.10b
+    # cross-checks the document here against the one a client would select, which is
+    # the pair a conforming client actually reads.
+    challenge_resource_metadata: str | None = None
+    # discovery URL -> parsed document, successes only
+    prm_documents: dict[str, dict] = field(default_factory=dict)
+    # advertised issuer -> its metadata, successes only
+    as_metadata_by_issuer: dict[str, dict] = field(default_factory=dict)
 
     # Raw transport-level evidence, keyed by a short label.
     http: dict[str, HttpObservation] = field(default_factory=dict)
