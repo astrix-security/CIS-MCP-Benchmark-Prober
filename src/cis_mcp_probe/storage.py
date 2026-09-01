@@ -8,6 +8,7 @@ browser login every time. We persist both under ``~/.cis-mcp-probe/tokens``.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 from mcp.client.auth import TokenStorage
@@ -37,6 +38,26 @@ class FileTokenStorage(TokenStorage):
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
         self._tokens_path.write_text(tokens.model_dump_json(indent=2))
+
+    def stored_token_expiry(self) -> float | None:
+        """When the stored access token expires, or None when that is unknown.
+
+        The stored record carries ``expires_in``, a lifetime, and no issue time.
+        The file is written when the token is issued, so its own modification time
+        is that issue time and the deadline is the sum of the two.
+
+        Returns None when there is no file, when it does not parse, or when it
+        names no lifetime. A caller with no deadline must leave the token alone.
+        """
+        try:
+            issued_at = self._tokens_path.stat().st_mtime
+            record = json.loads(self._tokens_path.read_text())
+        except (OSError, ValueError):
+            return None
+        lifetime = record.get("expires_in") if isinstance(record, dict) else None
+        if not isinstance(lifetime, (int, float)) or isinstance(lifetime, bool):
+            return None
+        return issued_at + lifetime
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         if self._client_path.exists():
