@@ -31,6 +31,10 @@ class HttpObservation:
     tls_version: str | None = None
     tls_cipher: str | None = None
     tls_cert: dict[str, Any] | None = None
+    # True when the chain verified against the system or environment trust store
+    # but NOT against the bundled public CA set. The certificate and the negotiated
+    # version then belong to whatever terminated the connection, not to the server.
+    tls_intercepted: bool = False
     error: str | None = None
     body_snippet: str | None = None
 
@@ -74,6 +78,19 @@ class ProbeContext:
     protected_resource_metadata: dict[str, Any] | None = None
     auth_server_metadata: dict[str, Any] | None = None
 
+    # Section 3 — token lifetime/scope and OAuth discovery documents.
+    token_expires_in: int | None = None  # expires_in from the stored token response
+    token_scope: str | None = None  # scope from the stored token response
+    challenge_scope: str | None = None  # scope parsed from WWW-Authenticate
+    # resource_metadata URL named by the 401 challenge, when it named one. Leg 3.3.2b
+    # cross-checks the document here against the one a client would select, which is
+    # the pair a conforming client actually reads.
+    challenge_resource_metadata: str | None = None
+    # discovery URL -> parsed document, successes only
+    prm_documents: dict[str, dict] = field(default_factory=dict)
+    # advertised issuer -> its metadata, successes only
+    as_metadata_by_issuer: dict[str, dict] = field(default_factory=dict)
+
     # Raw transport-level evidence, keyed by a short label.
     http: dict[str, HttpObservation] = field(default_factory=dict)
 
@@ -85,6 +102,45 @@ class ProbeContext:
         if self.init_result and self.init_result.serverInfo:
             return self.init_result.serverInfo.name
         return None
+
+    @property
+    def offers_oauth(self) -> bool:
+        """True when anything observed says this server does OAuth at all.
+
+        Several checks are vacuous against a server that does not, and each needs
+        the same answer. Any one of these five is enough, and no single one is
+        necessary: a 401 challenge, a token we hold, a protected-resource document,
+        authorization-server metadata we resolved, or a scope named in a challenge.
+
+        Read this rather than testing a subset. Four checks previously hand-rolled
+        it from two, four and five of these fields, which happened to agree only
+        because of how the fields are populated today.
+        """
+        return bool(
+            self.auth_required
+            or self.access_token
+            or self.prm_documents
+            or self.as_metadata_by_issuer
+            or self.challenge_scope
+        )
+
+    @property
+    def advertised_authorization_servers(self) -> list[str]:
+        """The usable ``authorization_servers`` entries, in advertised order.
+
+        The document is server-controlled, so a non-list value carries no entries
+        and a blank or non-string element is not a name. Callers that need to know
+        how many elements were discarded compare against the raw list's length.
+
+        Returns [] when no document was read. A caller that must tell that apart
+        from a document advertising none reads ``prm_documents`` too, which is what
+        the capability baseline does.
+        """
+        document = self.protected_resource_metadata
+        advertised = document.get("authorization_servers") if document else None
+        if not isinstance(advertised, list):
+            return []
+        return [e for e in advertised if isinstance(e, str) and e.strip()]
 
     def summary(self) -> dict[str, Any]:
         """A JSON-serializable snapshot of what we discovered (for reports/debug)."""
