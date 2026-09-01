@@ -10,8 +10,14 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    # The public CA set, imported directly: check 2.2 verifies against it alone to
+    # tell a server's certificate from a TLS-inspecting proxy's.
+    "certifi",
     "httpx>=0.28.1",
     "mcp>=1.28.1",
+    # Verify against the operating system's trust store, so a host behind a
+    # TLS-inspecting proxy is reachable without hand-assembling a CA bundle.
+    "truststore>=0.10",
 ]
 
 [project.scripts]
