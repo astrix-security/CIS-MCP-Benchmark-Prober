@@ -31,7 +31,13 @@ from jsonschema.validators import (
 from mcp.shared.exceptions import McpError
 
 from .. import inputs
-from ..rawreq import jsonrpc_error_code, raw_jsonrpc
+from ..client import RC_VERSION
+from ..rawreq import (
+    jsonrpc_error_code,
+    raw_endpoint_request,
+    raw_jsonrpc,
+    raw_jsonrpc_headers,
+)
 from ..context import ProbeContext
 from .base import Check, CheckResult, Level, register
 
@@ -842,4 +848,188 @@ class PromptArgumentDeclarations(Check):
             "inventory is complete."
         )
         verdict, evidence, legs = _aggregate(results, caveat=scope + reduction)
+        return getattr(self, f"_{verdict}")(evidence, legs=legs)
+
+
+def _revision_gate(rc_supported: bool, rc_version: str | None) -> str:
+    """Whether 5.2.3's probes may run, and if not, which verdict says so.
+
+    rc_supported is False both when the server named an older revision and when our
+    raw initialize never got an answer -- a 401, an unparseable SSE body, a timeout.
+    Only the first is a property of the server, so only it earns NO-REV.
+    """
+    if rc_supported:
+        return "run"
+    if rc_version:
+        return "no-rev"
+    return "unknown"
+
+
+def _status_outcome(status: int | None) -> tuple[str, str]:
+    """Classify a GET or DELETE status against the required 405."""
+    if status is None:
+        return "error", "no status returned, so the result is not attributable"
+    if status == 405:
+        return "pass", "405, no legacy surface exposed"
+    if 200 <= status < 300:
+        return "fail", f"{status} served, the legacy surface is exposed"
+    return "pass", f"{status}, a rejection but a deviation from the recommended 405"
+
+
+def _tools_list_body(req_id: int) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "method": "tools/list", "params": {}}
+
+
+def _is_tools_result(data: dict | None) -> bool:
+    return isinstance((data or {}).get("result"), dict) and "tools" in data["result"]
+
+
+@register
+class LegacySessionSurfaceDisabled(Check):
+    """5.2.3, Assessment Status: Automated.
+
+    Valid only for 2026-07-28: under an older revision a server is supposed to mint
+    Mcp-Session-Id and serve a standalone GET, so failing it would be wrong. Gated on
+    ctx.rc_supported rather than the session's negotiated version, because removal of
+    the legacy surface is a property of the endpoint rather than of one session.
+
+    Every leg pins MCP-Protocol-Version. A server supporting both revisions would
+    otherwise answer header-less requests under legacy semantics, correctly, and earn
+    a fail it did not deserve.
+
+    Not probed: whether a streamed response is scoped to its originating request. The
+    recommendation assigns that half to configuration review.
+    """
+
+    id = "5.2.3"
+    title = "Legacy Streamable HTTP session and stream-resumption are disabled"
+    section = "5"
+    level = Level.L1
+    remediation = (
+        "Under 2026-07-28, answer a standalone GET or DELETE on the MCP endpoint with "
+        "405, ignore Last-Event-ID, and neither mint nor echo Mcp-Session-Id."
+    )
+
+    async def run(self, ctx: ProbeContext) -> CheckResult:
+        gate = _revision_gate(ctx.rc_supported, ctx.rc_negotiated_version)
+        if gate == "no-rev":
+            return self._revision_unsupported(
+                f"this check is valid only for {RC_VERSION}; the server negotiated "
+                f"{ctx.rc_negotiated_version}. No probe was sent."
+            )
+        if gate == "unknown":
+            return self._unknown(
+                f"the raw initialize offering {RC_VERSION} never returned a version, "
+                "so the server's revision is unmeasured and its legacy surface cannot "
+                "be graded. No probe was sent."
+            )
+
+        endpoint = ctx.endpoint_url or ""
+        pinned = {"MCP-Protocol-Version": RC_VERSION}
+        results = []
+
+        get_status, _h, _t, _e = await raw_endpoint_request(
+            "GET",
+            endpoint,
+            extra_headers={**pinned, "Accept": "text/event-stream"},
+            token=ctx.access_token,
+        )
+        outcome, note = _status_outcome(get_status)
+        results.append(("5.2.3a", outcome, f"standalone GET: {note}"))
+
+        # No Mcp-Session-Id: a DELETE carrying it would end the live session and
+        # starve every check registered after this one.
+        del_status, _h, _t, _e = await raw_endpoint_request(
+            "DELETE", endpoint, extra_headers=pinned, token=ctx.access_token
+        )
+        outcome, note = _status_outcome(del_status)
+        results.append(("5.2.3b", outcome, f"DELETE: {note}"))
+
+        _s, control, _t = await raw_jsonrpc(
+            endpoint,
+            _tools_list_body(1),
+            token=ctx.access_token,
+            protocol_header=RC_VERSION,
+        )
+        _s, resumed, _t = await raw_jsonrpc(
+            endpoint,
+            _tools_list_body(2),
+            token=ctx.access_token,
+            protocol_header=RC_VERSION,
+            extra_headers={"Last-Event-ID": "1"},
+        )
+        if not _is_tools_result(control):
+            results.append(
+                ("5.2.3c", "unknown", "the control tools/list returned no tools result")
+            )
+        elif _is_tools_result(resumed):
+            results.append(
+                (
+                    "5.2.3c",
+                    "pass",
+                    (
+                        "a Last-Event-ID request was served identically to the control. "
+                        "Near-vacuous: resumption changes stream replay rather than "
+                        "whether a POST returns a result, so a resumption-supporting "
+                        "server also passes this leg"
+                    ),
+                )
+            )
+        else:
+            results.append(
+                ("5.2.3c", "fail", "the Last-Event-ID request was handled differently")
+            )
+
+        _s, c_data, _t, c_head = await raw_jsonrpc_headers(
+            endpoint,
+            _tools_list_body(3),
+            token=ctx.access_token,
+            protocol_header=RC_VERSION,
+        )
+        _s, s_data, _t, s_head = await raw_jsonrpc_headers(
+            endpoint,
+            _tools_list_body(4),
+            token=ctx.access_token,
+            protocol_header=RC_VERSION,
+            extra_headers={"Mcp-Session-Id": "cis-audit-supplied-000"},
+        )
+        # The response headers, not ctx.session_id: that field cannot tell a header
+        # the server minted from one the transport carried.
+        minted = [h for h in (c_head, s_head) if "mcp-session-id" in h]
+        if minted:
+            results.append(
+                (
+                    "5.2.3d",
+                    "fail",
+                    "the server minted or echoed an Mcp-Session-Id header",
+                )
+            )
+        elif _is_tools_result(s_data):
+            results.append(
+                (
+                    "5.2.3d",
+                    "pass",
+                    (
+                        "no Mcp-Session-Id was minted or echoed, and the request supplying "
+                        "one was still served normally"
+                    ),
+                )
+            )
+        else:
+            results.append(
+                (
+                    "5.2.3d",
+                    "unknown",
+                    (
+                        "no Mcp-Session-Id was minted, but the request supplying one was "
+                        "not served normally, so the header was not shown to be ignored"
+                    ),
+                )
+            )
+
+        reduction = (
+            " Not probed: whether a streamed response is scoped to its originating "
+            "authenticated request, which needs a second identity."
+        )
+        verdict, evidence, legs = _aggregate(results, caveat=reduction)
         return getattr(self, f"_{verdict}")(evidence, legs=legs)
