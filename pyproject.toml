@@ -14,11 +14,16 @@ dependencies = [
     # tell a server's certificate from a TLS-inspecting proxy's.
     "certifi",
     "httpx>=0.28.1",
+    # Compile each advertised tool schema under the JSON Schema dialect it declares.
+    "jsonschema>=4.26.0",
     "mcp>=1.28.1",
     # Verify against the operating system's trust store, so a host behind a
     # TLS-inspecting proxy is reachable without hand-assembling a CA bundle.
     "truststore>=0.10",
 ]
+
+[dependency-groups]
+dev = ["ruff>=0.6"]
 
 [project.scripts]
 cis-mcp-probe = "cis_mcp_probe:main"
