@@ -743,6 +743,33 @@ answered and advertises no authorization server is an observed absence, so the l
 decides against the record rather than reporting `UNKNOWN` — the same reading `3.3.4f`
 applies to `scopes_supported` in that document.
 
+## Section 4 — client (host) configuration: not probed
+
+All ten of Section 4's recommendations audit the **host or the client**, never the
+server. This probe reaches a server by domain and sees only what a client on the far
+side of that connection sees, so none of them is decidable here. That is a boundary of
+this tool, not a gap in the benchmark.
+
+Recommendation 4.1.5 states the boundary in its own audit text: verify behaviour "at
+the enforcement point, not by calling the MCP server directly unless the server is
+explicitly the enforcement point".
+
+| Control | What it audits | Why it is out of reach |
+|---|---|---|
+| 4.1.1 | Per-tool consent or a pre-approved allowlist | Host configuration and audit log |
+| 4.1.2 | Project-scoped server definitions | Client configuration, plus a workspace behavioural test |
+| 4.1.3 | Elicitation consent and redaction | Host audit log |
+| 4.1.4 | Sampling consent and redaction | A client capability and the sampling log |
+| 4.1.5 | Human denial of tool invocations | The host, gateway or policy engine |
+| 4.2.1 | Filesystem scope | OS-level controls on the server host |
+| 4.2.2 | stdio subprocess environment | The environment of a process this probe never spawns |
+| 4.2.3 | Untrusted Resource URI dereferencing | The host's direct-open surface |
+| 4.3.1 | MCP Apps sandboxing and CSP | Host rendering and its audit log |
+| 4.3.2 | MCP Apps permissions and logging | Host configuration and its audit log |
+
+No Section 4 module exists. Ten not-applicable entries would add code and no coverage,
+so the section is recorded here instead.
+
 ## Results against tested servers
 
 Sections 1 and 2 were probed on 2026-08-12 against hosted MCP servers, using the
