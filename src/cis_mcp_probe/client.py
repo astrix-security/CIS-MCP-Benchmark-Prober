@@ -256,35 +256,62 @@ async def _enumerate(ctx: ProbeContext, session: ClientSession) -> None:
 
 
 async def _detect_rc_support(ctx: ProbeContext) -> None:
-    """Offer the 2026-07-28 revision on a raw initialize and see what comes back.
+    """Send one 2026-07-28-shaped request and see whether the server serves it.
 
-    A server that supports the RC echoes 2026-07-28 as the negotiated version; an
-    older server negotiates down to whatever it does support. This is recorded so
-    checks can tell which wire format the server actually speaks.
+    The 2026-07-28 revision removed the initialize handshake (negotiation is
+    per-request), so offering the RC version inside a legacy initialize cannot
+    detect a conforming server: a strict modern server rejects the legacy
+    request outright, and a dual-era server serves it under a 2025-era version.
+    Detection therefore has to speak the revision it is probing for: a
+    tools/list carrying the MCP-Protocol-Version header, the Mcp-Method routing
+    header, and the per-request _meta envelope. A result means the server
+    served the request under 2026-07-28. A version-enforcement rejection
+    (-32022) means the revision is unsupported. Anything else is recorded but
+    not treated as support.
     """
     if not ctx.endpoint_url:
         return
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "initialize",
+        "method": "tools/list",
         "params": {
-            "protocolVersion": RC_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": RC_VERSION,
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": CLIENT_NAME,
+                    "version": CLIENT_VERSION,
+                },
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }
         },
     }
     try:
-        _status, data, _text = await raw_jsonrpc(
-            ctx.endpoint_url, payload, token=ctx.access_token
+        status, data, _text = await raw_jsonrpc(
+            ctx.endpoint_url,
+            payload,
+            token=ctx.access_token,
+            session_id=ctx.session_id,
+            protocol_header=RC_VERSION,
+            extra_headers={"Mcp-Method": "tools/list"},
         )
     except Exception as e:  # noqa: BLE001
         ctx.errors.append(f"rc-detect: {e!r}")
         return
-    if data and isinstance(data.get("result"), dict):
-        ver = data["result"].get("protocolVersion")
-        ctx.rc_negotiated_version = ver
-        ctx.rc_supported = ver == RC_VERSION
+    if status == 200 and data and data.get("result") is not None:
+        ctx.rc_negotiated_version = RC_VERSION
+        ctx.rc_supported = True
+        return
+    code = None
+    if data and isinstance(data.get("error"), dict):
+        code = data["error"].get("code")
+    ctx.rc_negotiated_version = None
+    ctx.rc_supported = False
+    if code not in (-32022, None):
+        ctx.errors.append(
+            f"rc-detect: RC-shaped probe rejected with code {code} at HTTP {status}, "
+            f"not a version-support rejection; RC recorded as unsupported"
+        )
 
 
 async def _run_checks(ctx: ProbeContext, checks: list[Check]) -> list[CheckResult]:
