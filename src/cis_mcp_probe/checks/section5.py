@@ -28,6 +28,9 @@ from jsonschema.validators import (
     Draft202012Validator,
 )
 
+from mcp.shared.exceptions import McpError
+
+from .. import inputs
 from ..context import ProbeContext
 from .base import Check, CheckResult, Level, register
 
@@ -261,3 +264,220 @@ class IdempotencyKeys(Check):
             "and are not MCP specification fields, so a FAIL against a server that "
             "never adopted them would be unearned."
         )
+
+
+# Carried by every leg that reads an inventory: _enumerate takes one page and drops
+# nextCursor, so no check can tell whether the inventory was truncated.
+PAGE_ONE = (
+    " Scope: page one of the advertised inventory only, because discovery reads a "
+    "single page and does not retain nextCursor."
+)
+
+_ORDER = ("fail", "error", "unknown", "pass")
+
+
+def _aggregate(
+    results: list[tuple[str, str, str]], caveat: str = ""
+) -> tuple[str, str, dict[str, str]]:
+    """Fold per-leg outcomes into one verdict name, one evidence string and a map.
+
+    A caveat is appended to evidence and never changes the fold: a reduction does
+    not downgrade a verdict.
+    """
+    legs = {label: outcome for label, outcome, _ in results}
+    evidence = "; ".join(f"{label}: {note}" for label, _, note in results)
+    for candidate in _ORDER:
+        if any(o == candidate for _, o, _ in results):
+            return candidate, evidence + caveat, legs
+    return "unknown", evidence + caveat, legs
+
+
+def _violating_args(args: dict, schema: dict) -> tuple[dict | None, str]:
+    """``args`` less one required property, or None and the reason.
+
+    The removed key must be in both the operator's object and the schema's required
+    list. Only in the object and the call stays schema-valid, so a conformant server
+    executes it and the leg records a false fail.
+    """
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return None, "the tool's inputSchema declares no required list"
+    shared = [k for k in required if isinstance(k, str) and k in args]
+    if not shared:
+        return None, (
+            "no property is both supplied by the operator and marked required, so "
+            "no removal would violate the schema"
+        )
+    return {k: v for k, v in args.items() if k != shared[0]}, shared[0]
+
+
+def _resolve_probe_tool(
+    entry: dict, tools: list
+) -> tuple[tuple[str, dict, str] | None, str]:
+    """Leg 5.1.1d's input, or None and why nothing will be sent.
+
+    Separate from the leg and synchronous, so the no-input paths are assertable
+    without standing up a session.
+    """
+    name = entry.get("schema_probe_tool")
+    if not name:
+        return None, "no schema_probe_tool for this domain"
+    args = entry.get("schema_probe_arguments")
+    if not args:
+        return None, f"schema_probe_tool {name!r} has no schema_probe_arguments"
+    match = next((t for t in tools if t.name == name), None)
+    if match is None:
+        return None, f"the server does not advertise a tool named {name!r}"
+    violating, why = _violating_args(args, match.inputSchema)
+    if violating is None:
+        return None, why
+    return (name, violating, why), ""
+
+
+def _leg_5111a(ctx: ProbeContext) -> tuple[str, str, str]:
+    """Every advertised inputSchema compiles under its declared dialect."""
+    state, note = _inventory_state(ctx, "tools")
+    if state == 0:
+        return "5.1.1a", "error", note
+    if state != 4:
+        return "5.1.1a", "unknown", note
+    bad, unknown_dialect = [], []
+    for tool in ctx.tools:
+        outcome, dialect, _ = compile_schema(tool.inputSchema)
+        if outcome == "unrecognised-dialect":
+            unknown_dialect.append(f"{tool.name} declares {dialect!r}")
+        elif outcome != "ok":
+            bad.append(f"{tool.name} inputSchema under {dialect}: {outcome}")
+    if bad:
+        return "5.1.1a", "fail", "; ".join(bad)
+    if unknown_dialect:
+        return "5.1.1a", "unknown", "; ".join(unknown_dialect)
+    return "5.1.1a", "pass", f"{len(ctx.tools)} inputSchema(s) compiled"
+
+
+def _leg_5111b(ctx: ProbeContext) -> tuple[str, str, str]:
+    """Every declared outputSchema compiles. None declared cannot pass."""
+    state, note = _inventory_state(ctx, "tools")
+    if state == 0:
+        return "5.1.1b", "error", note
+    if state != 4:
+        return "5.1.1b", "unknown", note
+    declared = [t for t in ctx.tools if t.outputSchema is not None]
+    if not declared:
+        # Optional under the revision, so its absence is not a finding -- but a leg
+        # that compiled nothing cannot report a pass.
+        return "5.1.1b", "unknown", "no tool declares an outputSchema"
+    bad = []
+    for tool in declared:
+        outcome, dialect, _ = compile_schema(tool.outputSchema)
+        if outcome != "ok":
+            bad.append(f"{tool.name} outputSchema under {dialect}: {outcome}")
+    if bad:
+        return "5.1.1b", "fail", "; ".join(bad)
+    return "5.1.1b", "pass", f"{len(declared)} outputSchema(s) compiled"
+
+
+def _leg_5111c(ctx: ProbeContext) -> tuple[str, str, str]:
+    """External $ref count. Evidence only: the requirement binds the server's own
+    validator configuration, which nothing observable reaches."""
+    names = [
+        t.name
+        for t in ctx.tools
+        if compile_schema(t.inputSchema)[2]
+        or (t.outputSchema is not None and compile_schema(t.outputSchema)[2])
+    ]
+    if not names:
+        return "5.1.1c", "", "no advertised schema carries an external $ref"
+    return (
+        "5.1.1c",
+        "",
+        (
+            f"{len(names)} schema(s) carry an external $ref ({', '.join(names)}), so "
+            "5.1.1a compiled them with that reference unresolved"
+        ),
+    )
+
+
+# The two codes that earn a fail on 5.1.1d. The recommendation is explicit that a
+# schema violation is a tool execution error, so a protocol error is the finding --
+# but only these two are attributable to the validation path. A -32601, a 500 or a
+# bare 4xx from a gateway says nothing about which error the server chose.
+_PROTOCOL_INSTEAD_OF_EXECUTION = (-32602, -32600)
+
+
+async def _leg_5111d(ctx: ProbeContext) -> tuple[str, str, str]:
+    """A schema-violating call is surfaced as an execution error, not executed."""
+    if ctx.session is None:
+        return "5.1.1d", "error", "no live session to call a tool through"
+    resolved, why = _resolve_probe_tool(inputs.load(ctx.domain), ctx.tools)
+    if resolved is None:
+        return "5.1.1d", "unknown", f"{why}, so no tools/call was sent"
+    name, args, dropped = resolved
+    try:
+        result = await ctx.session.call_tool(name, args)
+    except McpError as exc:
+        code = getattr(exc.error, "code", None)
+        if code in _PROTOCOL_INSTEAD_OF_EXECUTION:
+            return (
+                "5.1.1d",
+                "fail",
+                (
+                    f"omitting required {dropped!r} was rejected with protocol error "
+                    f"{code}, not surfaced as a tool execution error"
+                ),
+            )
+        return (
+            "5.1.1d",
+            "error",
+            (
+                f"the call failed with {code}, which does not show the server chose a "
+                "protocol error over an execution error"
+            ),
+        )
+    if getattr(result, "isError", False):
+        return (
+            "5.1.1d",
+            "pass",
+            (f"omitting required {dropped!r} was surfaced as a tool execution error"),
+        )
+    return (
+        "5.1.1d",
+        "fail",
+        (
+            f"the server returned a normal result for a call omitting required {dropped!r}"
+        ),
+    )
+
+
+@register
+class ToolSchemaValidation(Check):
+    """5.1.1, Assessment Status: Automated.
+
+    Scoped to what a client sees: the advertised schemas compile, and a violating
+    call is not executed. Not probed: schema depth and validation-time bounds, and
+    field sanitization, none of which has a wire signature.
+    """
+
+    id = "5.1.1"
+    title = "Tool schemas and argument types are validated"
+    section = "5"
+    level = Level.L1
+    remediation = (
+        "Validate every tool input and output against the advertised schema before "
+        "the tool executes, using the dialect each schema declares. Return a "
+        "schema-violating call as a tool execution error with isError set, not as a "
+        "protocol error."
+    )
+
+    async def run(self, ctx: ProbeContext) -> CheckResult:
+        results = [_leg_5111a(ctx), _leg_5111b(ctx), await _leg_5111d(ctx)]
+        reduction = (
+            " Not probed: schema depth and validation-time bounds and field "
+            "sanitization have no wire signature. Evidence only: "
+            + _leg_5111c(ctx)[2]
+            + "."
+        )
+        verdict, evidence, legs = _aggregate(
+            [r for r in results if r[1]], caveat=PAGE_ONE + reduction
+        )
+        return getattr(self, f"_{verdict}")(evidence, legs=legs)
