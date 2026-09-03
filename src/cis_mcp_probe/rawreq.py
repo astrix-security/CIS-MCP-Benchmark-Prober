@@ -234,6 +234,48 @@ async def raw_post_json(
     )
 
 
+async def raw_endpoint_request(
+    method: str,
+    endpoint: str,
+    *,
+    extra_headers: dict[str, str] | None = None,
+    token: str | None = None,
+    timeout: float = 8.0,
+) -> tuple[int | None, dict[str, str], str, str | None]:
+    """Send ``method`` to the MCP endpoint itself and return its status and headers.
+
+    Takes one URL, the endpoint, because that is the only thing it may address.
+
+    The host guard is not consulted, and that is the guard's scope rather than an
+    exception to it: the guard covers URLs outside the endpoint's own origin, and
+    ``raw_jsonrpc`` already skips it for the same reason.
+
+    The response body is never read, and the returned text is always empty. A
+    standalone GET against a server that still serves the legacy stream answers with
+    an event stream that does not end, so reading the body would block for the
+    stream's lifetime and lose the status that is the observation.
+    """
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if extra_headers:
+        headers.update(extra_headers)
+
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=timeout, verify=verify_context()
+        ) as client:
+            async with client.stream(method, endpoint, headers=headers) as resp:
+                return (
+                    resp.status_code,
+                    {k.lower(): v for k, v in resp.headers.items()},
+                    "",
+                    None,
+                )
+    except Exception as exc:  # a caller gets an error string, never a raise
+        return None, {}, "", repr(exc)
+
+
 def jsonrpc_error_code(data: dict[str, Any] | None) -> int | None:
     """Return the JSON-RPC ``error.code`` if the response carries one."""
     if data and isinstance(data.get("error"), dict):
