@@ -1033,3 +1033,118 @@ class LegacySessionSurfaceDisabled(Check):
         )
         verdict, evidence, legs = _aggregate(results, caveat=reduction)
         return getattr(self, f"_{verdict}")(evidence, legs=legs)
+
+
+# What a returned body must look like to establish escape. The root is not
+# observable from the wire, so a comparison of two responses cannot answer "did this
+# escape?" -- aiming at a known-outside target is what makes a body attributable.
+_OUT_OF_ROOT_TARGET = "etc/passwd"
+_TARGET_MARKERS = ("root:", "/bin/", "/usr/bin/", "nologin")
+
+
+def _traversal_uri(control: str) -> tuple[str | None, str]:
+    """A traversal aimed at a target outside any plausible root, or None and why.
+
+    Built by concatenation only. AnyUrl and urljoin both apply RFC 3986 dot-segment
+    removal, so either would strip the ../ before the request left and silently turn
+    this into a different test that a non-conformant server passes.
+    """
+    scheme, sep, rest = control.partition("://")
+    if not sep or "/" not in rest:
+        return None, "the control URI has no path segments, so no target is outside it"
+    depth = rest.count("/") + 2
+    return f"{scheme}://{rest.rstrip('/')}/" + "../" * depth + _OUT_OF_ROOT_TARGET, ""
+
+
+def _traversal_outcome(contents: bool, matches_target: bool) -> tuple[str, str]:
+    """Classify the traversal read. Contents alone is not the finding."""
+    if not contents:
+        return "pass", "the traversal read returned no contents"
+    if matches_target:
+        return "fail", "the traversal read returned the out-of-root target's contents"
+    return "unknown", (
+        "the traversal read returned contents that are not the out-of-root target, "
+        "which is what dot-segment removal to an in-root resource produces"
+    )
+
+
+def _looks_like_target(data: dict | None) -> bool:
+    """Whether a resources/read result carries the out-of-root target's content."""
+    contents = ((data or {}).get("result") or {}).get("contents") or []
+    text = " ".join(str(c.get("text", "")) for c in contents if isinstance(c, dict))
+    return any(marker in text for marker in _TARGET_MARKERS)
+
+
+@register
+class PathTraversalPrevented(Check):
+    """5.4.1, Assessment Status: Automated.
+
+    Only the ../ path is probed. The symlink path is guarded independently, and
+    staging one is filesystem write access on the server host -- so a pass here says
+    nothing about it. Applying the same probe to every path-taking tool is excluded
+    on side-effect grounds rather than reach: it would mean calling an arbitrary tool
+    surface with traversal values.
+    """
+
+    id = "5.4.1"
+    title = "Path traversal and arbitrary filesystem access are prevented"
+    section = "5"
+    level = Level.L1
+    remediation = (
+        "Canonicalize every supplied path before any access check, comparing by path "
+        "component rather than by string prefix, and guard the symlink path "
+        "independently of the ../ path."
+    )
+
+    async def run(self, ctx: ProbeContext) -> CheckResult:
+        reduction = (
+            " Not probed: the symlink path, which needs filesystem write access on "
+            "the server, and it is guarded independently of the ../ path so this says "
+            "nothing about it. Excluded on side-effect grounds rather than reach: "
+            "applying the same probe to every path-taking tool."
+        )
+        if ctx.session is None:
+            return self._error("no live session to read through" + reduction)
+
+        control = inputs.load(ctx.domain).get("traversal_control_uri")
+        source = "operator-supplied"
+        if not control and ctx.resources:
+            control, source = str(ctx.resources[0].uri), "derived from ctx.resources[0]"
+        if not control:
+            return self._unknown(
+                "no traversal_control_uri for this domain and the server advertises no "
+                "resource, so no positive control exists and no read was sent."
+                + reduction,
+                legs={"5.4.1a": "unknown"},
+            )
+
+        traversal, why = _traversal_uri(control)
+        if traversal is None:
+            return self._pass(
+                f"the control URI {control!r} ({source}) {why}, so nothing was escaped "
+                "and no traversal was sent." + reduction,
+                legs={"5.4.1a": "pass"},
+            )
+
+        control_data, _payload = await _read_uri(ctx, 1, control)
+        if not ((control_data or {}).get("result") or {}).get("contents"):
+            return self._unknown(
+                f"the positive-control read of {control!r} ({source}) returned no "
+                "contents, so a traversal denial could not be attributed to path "
+                "confinement." + reduction,
+                legs={"5.4.1a": "unknown"},
+            )
+
+        data, payload = await _read_uri(ctx, 2, traversal)
+        contents = bool(((data or {}).get("result") or {}).get("contents"))
+        outcome, note = _traversal_outcome(contents, _looks_like_target(data))
+        # Rendered from the payload dict that went on the wire, so the evidence
+        # cannot disagree with what was actually sent.
+        evidence = (
+            f"control {control!r} ({source}) returned contents; reading "
+            f"{payload['params']['uri']!r}: {note}"
+        )
+        verdict, evidence, legs = _aggregate(
+            [("5.4.1a", outcome, evidence)], caveat=reduction
+        )
+        return getattr(self, f"_{verdict}")(evidence, legs=legs)
