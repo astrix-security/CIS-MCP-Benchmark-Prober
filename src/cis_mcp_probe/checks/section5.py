@@ -31,6 +31,7 @@ from jsonschema.validators import (
 from mcp.shared.exceptions import McpError
 
 from .. import inputs
+from ..rawreq import jsonrpc_error_code, raw_jsonrpc
 from ..context import ProbeContext
 from .base import Check, CheckResult, Level, register
 
@@ -480,4 +481,365 @@ class ToolSchemaValidation(Check):
         verdict, evidence, legs = _aggregate(
             [r for r in results if r[1]], caveat=PAGE_ONE + reduction
         )
+        return getattr(self, f"_{verdict}")(evidence, legs=legs)
+
+
+def _refusal_outcome(code: int | None, has_result: bool) -> tuple[str, str]:
+    """Classify a rejection the recommendation requires but does not code exactly.
+
+    Any attributable error code is a pass: the server refused, and which rule fired
+    is ambiguous rather than absent. A served result is the failure.
+    """
+    if code == -32602:
+        return "pass", "rejected with -32602"
+    if code == -32002:
+        return "pass", "rejected with the legacy -32002, which the audit text accepts"
+    if code is not None:
+        return "pass", f"rejected with {code}, a deviation from the recommended -32602"
+    if has_result:
+        return "fail", "the server returned a normal result"
+    return "error", "neither an error code nor a result, so it is not attributable"
+
+
+def _substitute_template(uri_template: str) -> str | None:
+    """``uri_template`` with an implausible value for its first variable."""
+    start = uri_template.find("{")
+    end = uri_template.find("}", start + 1)
+    if start == -1 or end == -1:
+        return None
+    return uri_template[:start] + "cis-audit-no-such-value" + uri_template[end + 1 :]
+
+
+def _first_required_prompt(raw: dict) -> dict | None:
+    """The first advertised prompt carrying a required argument, from raw JSON."""
+    prompts = (raw.get("result") or {}).get("prompts")
+    if not isinstance(prompts, list):
+        return None
+    for prompt in prompts:
+        args = prompt.get("arguments") if isinstance(prompt, dict) else None
+        if isinstance(args, list) and any(
+            isinstance(a, dict) and a.get("required") for a in args
+        ):
+            return prompt
+    return None
+
+
+def _read_payload(req_id: int, uri: str) -> dict:
+    """The resources/read payload, built by concatenation only.
+
+    Returned rather than sent, so a self-check can inspect the exact uri that will
+    go on the wire. AnyUrl and urljoin both apply RFC 3986 dot-segment removal,
+    which would strip a traversal before it left.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": "resources/read",
+        "params": {"uri": uri},
+    }
+
+
+def _raw_prompts(raw: dict) -> list | None:
+    """The prompts array from a raw prompts/list result, or None."""
+    prompts = (raw.get("result") or {}).get("prompts")
+    return prompts if isinstance(prompts, list) else None
+
+
+def _leg_5112a(ctx: ProbeContext) -> tuple[str, str, str]:
+    """Every advertised resource template declares a non-empty uriTemplate."""
+    state, note = _inventory_state(ctx, "resource_templates")
+    if state == 0:
+        return "5.1.2a", "error", note
+    if state != 4:
+        # Templates key off the resources capability, so state 1 cannot tell "no
+        # template surface" from "no resource surface".
+        return "5.1.2a", "unknown", note
+    bad = [t for t in ctx.resource_templates if not (t.uriTemplate or "").strip()]
+    if bad:
+        return "5.1.2a", "fail", f"{len(bad)} template(s) declare an empty uriTemplate"
+    return (
+        "5.1.2a",
+        "pass",
+        (
+            f"{len(ctx.resource_templates)} template(s) declare a uriTemplate. A null or "
+            "non-string value is not observable: the SDK types the field str, so such a "
+            "document fails validation before it reaches this check"
+        ),
+    )
+
+
+def _leg_5112b(ctx: ProbeContext) -> tuple[str, str, str]:
+    """Every advertised resource template declares an explicit MIME type."""
+    state, note = _inventory_state(ctx, "resource_templates")
+    if state == 0:
+        return "5.1.2b", "error", note
+    if state != 4:
+        return "5.1.2b", "unknown", note
+    bad = [t for t in ctx.resource_templates if not (t.mimeType or "").strip()]
+    stricter = (
+        "this requirement is stricter than base MCP, which makes mimeType optional"
+    )
+    if bad:
+        return (
+            "5.1.2b",
+            "fail",
+            (f"{len(bad)} template(s) declare no mimeType; {stricter}"),
+        )
+    return (
+        "5.1.2b",
+        "pass",
+        (f"{len(ctx.resource_templates)} template(s) declare a mimeType; {stricter}"),
+    )
+
+
+def _leg_5113a(raw: dict) -> tuple[str, str, str]:
+    """Every declared prompt argument names its parameter, read from raw JSON."""
+    prompts = _raw_prompts(raw)
+    if prompts is None:
+        return (
+            "5.1.3a",
+            "unknown",
+            "the raw prompts/list reply carried no prompts array",
+        )
+    if not prompts:
+        return "5.1.3a", "unknown", "the server advertised no prompt"
+    bad = [
+        f"{p.get('name')!r} argument {a.get('name')!r}"
+        for p in prompts
+        for a in (p.get("arguments") or [])
+        if not isinstance(a.get("name"), str) or not a["name"].strip()
+    ]
+    if bad:
+        return "5.1.3a", "fail", f"non-string or empty argument name: {'; '.join(bad)}"
+    return "5.1.3a", "pass", f"{len(prompts)} prompt(s) name every declared argument"
+
+
+def _leg_5113b(raw: dict) -> tuple[str, str, str]:
+    """``required`` is a JSON boolean where present.
+
+    Read raw, because Pydantic runs in lax mode and coerces "yes", "1", 1 and 1.0 to
+    True -- so a leg reading ctx.prompts would pass the violation it tests.
+    """
+    prompts = _raw_prompts(raw)
+    if prompts is None:
+        return (
+            "5.1.3b",
+            "unknown",
+            "the raw prompts/list reply carried no prompts array",
+        )
+    if not prompts:
+        return "5.1.3b", "unknown", "the server advertised no prompt"
+    bad = [
+        f"{p.get('name')!r} argument {a.get('name')!r} declares required={a['required']!r}"
+        for p in prompts
+        for a in (p.get("arguments") or [])
+        if "required" in a and not isinstance(a["required"], bool)
+    ]
+    if bad:
+        return "5.1.3b", "fail", "; ".join(bad)
+    return "5.1.3b", "pass", f"{len(prompts)} prompt(s) declare a boolean required"
+
+
+async def _read_uri(
+    ctx: ProbeContext, req_id: int, uri: str
+) -> tuple[dict | None, dict]:
+    """resources/read through raw_jsonrpc, returning (parsed, payload_sent).
+
+    Never session.read_resource: its signature takes a pydantic AnyUrl, which
+    rewrites a URI on construction. The payload is returned so evidence renders from
+    the exact dict that went on the wire.
+    """
+    payload = _read_payload(req_id, uri)
+    _status, data, _text = await raw_jsonrpc(
+        ctx.endpoint_url or "",
+        payload,
+        token=ctx.access_token,
+        session_id=ctx.session_id,
+    )
+    return data, payload
+
+
+async def _leg_5112c(ctx: ProbeContext) -> tuple[str, str, str]:
+    """A read of a non-existent resource is rejected."""
+    if ctx.session is None:
+        return "5.1.2c", "error", "no live session to read through"
+    if not ctx.resources:
+        return (
+            "5.1.2c",
+            "unknown",
+            (
+                "no concrete resource to use as a positive control, so a refusal could "
+                "not be attributed to existence checking"
+            ),
+        )
+    if not ctx.resource_templates:
+        return "5.1.2c", "unknown", "no advertised template to build a missing URI from"
+    missing = _substitute_template(ctx.resource_templates[0].uriTemplate)
+    if missing is None:
+        return (
+            "5.1.2c",
+            "unknown",
+            (
+                f"template {ctx.resource_templates[0].uriTemplate!r} declares no variable, "
+                "so no implausible URI could be built"
+            ),
+        )
+    control, _ = await _read_uri(ctx, 1, str(ctx.resources[0].uri))
+    if not ((control or {}).get("result") or {}).get("contents"):
+        return "5.1.2c", "unknown", "the positive-control read returned no contents"
+    data, payload = await _read_uri(ctx, 2, missing)
+    outcome, note = _refusal_outcome(
+        jsonrpc_error_code(data), bool((data or {}).get("result"))
+    )
+    return "5.1.2c", outcome, f"reading {payload['params']['uri']!r}: {note}"
+
+
+async def _prompts_raw(ctx: ProbeContext) -> dict:
+    """One raw prompts/list, serving legs 5.1.3a and 5.1.3b."""
+    _status, data, _text = await raw_jsonrpc(
+        ctx.endpoint_url or "",
+        {"jsonrpc": "2.0", "id": 1, "method": "prompts/list", "params": {}},
+        token=ctx.access_token,
+        session_id=ctx.session_id,
+    )
+    return data or {}
+
+
+async def _get_prompt(ctx: ProbeContext, req_id: int, name: str, args: dict) -> dict:
+    _status, data, _text = await raw_jsonrpc(
+        ctx.endpoint_url or "",
+        {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "prompts/get",
+            "params": {"name": name, "arguments": args},
+        },
+        token=ctx.access_token,
+        session_id=ctx.session_id,
+    )
+    return data or {}
+
+
+async def _leg_5113c(ctx: ProbeContext, raw: dict) -> tuple[str, str, str]:
+    """A prompts/get omitting a required argument is rejected."""
+    if ctx.session is None:
+        return "5.1.3c", "error", "no live session to call prompts/get through"
+    prompt = _first_required_prompt(raw)
+    if prompt is None:
+        return "5.1.3c", "unknown", "no advertised prompt declares a required argument"
+    name = prompt["name"]
+    valid = {
+        a["name"]: "cis-audit-placeholder"
+        for a in prompt.get("arguments") or []
+        if isinstance(a.get("name"), str)
+    }
+    control = await _get_prompt(ctx, 2, name, valid)
+    if not ((control.get("result") or {}).get("messages")):
+        # A placeholder is not a valid value for every argument, so this is a real
+        # possibility rather than a defect, and the audit directs the same reading.
+        return (
+            "5.1.3c",
+            "unknown",
+            (
+                f"the control prompts/get for {name!r} returned no messages, so a "
+                "missing-argument rejection could not be attributed"
+            ),
+        )
+    data = await _get_prompt(ctx, 3, name, {})
+    outcome, note = _refusal_outcome(jsonrpc_error_code(data), bool(data.get("result")))
+    return "5.1.3c", outcome, f"omitting a required argument of {name!r}: {note}"
+
+
+async def _leg_5113d(ctx: ProbeContext, raw: dict) -> tuple[str, str, str]:
+    """An invalid prompt name is rejected.
+
+    Reuses 5.1.3c's control: answering prompts/list says nothing about prompts/get
+    being implemented, and a server refusing every prompts/get would otherwise pass.
+    """
+    if ctx.session is None:
+        return "5.1.3d", "error", "no live session to call prompts/get through"
+    prompt = _first_required_prompt(raw)
+    if prompt is None:
+        return "5.1.3d", "unknown", "no prompt available to establish a passing control"
+    data = await _get_prompt(ctx, 4, "cis-audit-no-such-prompt", {})
+    outcome, note = _refusal_outcome(jsonrpc_error_code(data), bool(data.get("result")))
+    return "5.1.3d", outcome, f"an unadvertised prompt name: {note}"
+
+
+@register
+class ResourceTemplateDeclarations(Check):
+    """5.1.2, Assessment Status: Automated.
+
+    Not probed: substitution ordering is server-internal, and the access-control
+    namespace and nosniff halves are conditional on deployment intent this probe
+    cannot read. The recommendation states both as a stricter CIS posture.
+    """
+
+    id = "5.1.2"
+    title = "Resource templates with explicit URI patterns and MIME types are used"
+    section = "5"
+    level = Level.L1
+    remediation = (
+        "Declare a non-empty uriTemplate and an explicit mimeType on every resource "
+        "template, and reject a read of a non-existent resource with -32602."
+    )
+
+    async def run(self, ctx: ProbeContext) -> CheckResult:
+        results = [_leg_5112a(ctx), _leg_5112b(ctx), await _leg_5112c(ctx)]
+        reduction = (
+            " Not probed: substitution ordering is server-internal, and the "
+            "approved-namespace and nosniff requirements depend on deployment intent "
+            "this probe cannot read."
+        )
+        verdict, evidence, legs = _aggregate(results, caveat=PAGE_ONE + reduction)
+        return getattr(self, f"_{verdict}")(evidence, legs=legs)
+
+
+@register
+class PromptArgumentDeclarations(Check):
+    """5.1.3, Assessment Status: Automated.
+
+    Legs a and b read a raw prompts/list rather than ctx.prompts: Pydantic coerces a
+    non-boolean ``required``, so the SDK path would pass the violation leg b tests.
+
+    Not probed: whether prompt logic runs only on an explicit prompts/get, and
+    whether the prompt name is recorded per invocation. Neither has a wire signature.
+    """
+
+    id = "5.1.3"
+    title = "Prompt templates declare and validate their arguments"
+    section = "5"
+    level = Level.L1
+    remediation = (
+        "Declare every prompt argument with a non-empty name and a boolean required "
+        "flag, and reject an invalid prompt name or a missing required argument with "
+        "-32602."
+    )
+
+    async def run(self, ctx: ProbeContext) -> CheckResult:
+        state, note = _inventory_state(ctx, "prompts")
+        if state == 0:
+            return self._error(note)
+        if state in (1, 2, 3):
+            return self._unknown(note + PAGE_ONE, legs={})
+        raw = await _prompts_raw(ctx)
+        results = [
+            _leg_5113a(raw),
+            _leg_5113b(raw),
+            await _leg_5113c(ctx, raw),
+            await _leg_5113d(ctx, raw),
+        ]
+        reduction = (
+            " Not probed: whether prompt logic runs only on an explicit prompts/get, "
+            "and whether each invocation records the prompt name."
+        )
+        truncated = (raw.get("result") or {}).get("nextCursor")
+        scope = (
+            " The raw prompts/list reply carried a nextCursor, so a later page is "
+            "unexamined."
+            if truncated
+            else " The raw prompts/list reply carried no nextCursor, so the prompt "
+            "inventory is complete."
+        )
+        verdict, evidence, legs = _aggregate(results, caveat=scope + reduction)
         return getattr(self, f"_{verdict}")(evidence, legs=legs)
