@@ -19,6 +19,7 @@ The other five are operator-side and return NOT_APPLICABLE with the reason.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from jsonschema.exceptions import SchemaError
@@ -726,13 +727,21 @@ async def _get_prompt(ctx: ProbeContext, req_id: int, name: str, args: dict) -> 
     return data or {}
 
 
-async def _leg_5113c(ctx: ProbeContext, raw: dict) -> tuple[str, str, str]:
-    """A prompts/get omitting a required argument is rejected."""
+async def _leg_5113c(ctx: ProbeContext, raw: dict) -> tuple[str, str, str, bool]:
+    """A prompts/get omitting a required argument is rejected.
+
+    Returns a fourth value: whether the control call succeeded, which 5.1.3d needs.
+    """
     if ctx.session is None:
-        return "5.1.3c", "error", "no live session to call prompts/get through"
+        return "5.1.3c", "error", "no live session to call prompts/get through", False
     prompt = _first_required_prompt(raw)
     if prompt is None:
-        return "5.1.3c", "unknown", "no advertised prompt declares a required argument"
+        return (
+            "5.1.3c",
+            "unknown",
+            "no advertised prompt declares a required argument",
+            False,
+        )
     name = prompt["name"]
     valid = {
         a["name"]: "cis-audit-placeholder"
@@ -753,20 +762,29 @@ async def _leg_5113c(ctx: ProbeContext, raw: dict) -> tuple[str, str, str]:
         )
     data = await _get_prompt(ctx, 3, name, {})
     outcome, note = _refusal_outcome(jsonrpc_error_code(data), bool(data.get("result")))
-    return "5.1.3c", outcome, f"omitting a required argument of {name!r}: {note}"
+    return "5.1.3c", outcome, f"omitting a required argument of {name!r}: {note}", True
 
 
-async def _leg_5113d(ctx: ProbeContext, raw: dict) -> tuple[str, str, str]:
+async def _leg_5113d(
+    ctx: ProbeContext, raw: dict, control_passed: bool
+) -> tuple[str, str, str]:
     """An invalid prompt name is rejected.
 
-    Reuses 5.1.3c's control: answering prompts/list says nothing about prompts/get
-    being implemented, and a server refusing every prompts/get would otherwise pass.
+    Takes 5.1.3c's control RESULT, not merely the existence of a prompt: answering
+    prompts/list says nothing about prompts/get being implemented, and a server
+    refusing every such call would otherwise record a pass here.
     """
     if ctx.session is None:
         return "5.1.3d", "error", "no live session to call prompts/get through"
-    prompt = _first_required_prompt(raw)
-    if prompt is None:
-        return "5.1.3d", "unknown", "no prompt available to establish a passing control"
+    if not control_passed:
+        return (
+            "5.1.3d",
+            "unknown",
+            (
+                "no prompts/get control succeeded, so a rejection of an unadvertised name "
+                "could not be attributed to name validation"
+            ),
+        )
     data = await _get_prompt(ctx, 4, "cis-audit-no-such-prompt", {})
     outcome, note = _refusal_outcome(jsonrpc_error_code(data), bool(data.get("result")))
     return "5.1.3d", outcome, f"an unadvertised prompt name: {note}"
@@ -826,14 +844,22 @@ class PromptArgumentDeclarations(Check):
         state, note = _inventory_state(ctx, "prompts")
         if state == 0:
             return self._error(note)
-        if state in (1, 2, 3):
-            return self._unknown(note + PAGE_ONE, legs={})
+        if state == 1:
+            return self._unknown(note, legs={})
+        # The raw read comes BEFORE the remaining state check. PromptArgument.name is
+        # a required str and pydantic does not coerce into one, so one non-string name
+        # loses the whole parsed list -- state 2. Gating on state first would return
+        # before the raw read and make that violation, the one raw reading exists to
+        # observe, permanently invisible.
         raw = await _prompts_raw(ctx)
+        if _raw_prompts(raw) is None and state in (2, 3):
+            return self._unknown(note, legs={})
+        label_c, outcome_c, note_c, control_passed = await _leg_5113c(ctx, raw)
         results = [
             _leg_5113a(raw),
             _leg_5113b(raw),
-            await _leg_5113c(ctx, raw),
-            await _leg_5113d(ctx, raw),
+            (label_c, outcome_c, note_c),
+            await _leg_5113d(ctx, raw, control_passed),
         ]
         reduction = (
             " Not probed: whether prompt logic runs only on an explicit prompts/get, "
@@ -975,9 +1001,32 @@ class LegacySessionSurfaceDisabled(Check):
                     ),
                 )
             )
-        else:
+        elif jsonrpc_error_code(resumed) is not None:
             results.append(
-                ("5.2.3c", "fail", "the Last-Event-ID request was handled differently")
+                (
+                    "5.2.3c",
+                    "fail",
+                    (
+                        f"the control returned tools (HTTP {c_status}) while the "
+                        f"Last-Event-ID request was refused with JSON-RPC "
+                        f"{jsonrpc_error_code(resumed)} (HTTP {r_status}), so the header "
+                        "was not ignored"
+                    ),
+                )
+            )
+        else:
+            # A 429 after the control, a transient 5xx or a gateway hiccup all land
+            # here, and none of them shows the server treated the header specially.
+            results.append(
+                (
+                    "5.2.3c",
+                    "error",
+                    (
+                        f"the control returned tools (HTTP {c_status}) but the "
+                        f"Last-Event-ID request returned no JSON-RPC response (HTTP "
+                        f"{r_status}), which is not attributable to the header"
+                    ),
+                )
             )
 
         _s, c_data, _t, c_head = await raw_jsonrpc_headers(
@@ -1039,7 +1088,10 @@ class LegacySessionSurfaceDisabled(Check):
 # observable from the wire, so a comparison of two responses cannot answer "did this
 # escape?" -- aiming at a known-outside target is what makes a body attributable.
 _OUT_OF_ROOT_TARGET = "etc/passwd"
-_TARGET_MARKERS = ("root:", "/bin/", "/usr/bin/", "nologin")
+# The SHAPE of a passwd line, not a word from one. Matching "/bin/" or "root:"
+# anywhere would fail any server that serves a README, a Dockerfile or a YAML body,
+# which is what a conformant server returns after resolving the URI in-root.
+_PASSWD_LINE = re.compile(r"(?m)^[a-z_][a-z0-9_-]*:[^:]*:\d+:\d+:")
 
 
 def _traversal_uri(control: str) -> tuple[str | None, str]:
@@ -1056,10 +1108,20 @@ def _traversal_uri(control: str) -> tuple[str | None, str]:
     return f"{scheme}://{rest.rstrip('/')}/" + "../" * depth + _OUT_OF_ROOT_TARGET, ""
 
 
-def _traversal_outcome(contents: bool, matches_target: bool) -> tuple[str, str]:
+def _traversal_outcome(
+    refused: bool, contents: bool, matches_target: bool
+) -> tuple[str, str]:
     """Classify the traversal read. Contents alone is not the finding."""
+    if not refused and not contents:
+        # An unparseable body -- a WAF's HTML 403, a 429, a gateway 500 -- is the
+        # likeliest real reaction to this payload, and it says nothing about path
+        # confinement. Grading it a pass would be the unearned verdict.
+        return "error", (
+            "the traversal read returned neither a JSON-RPC error nor a result, so it "
+            "is not attributable to path confinement"
+        )
     if not contents:
-        return "pass", "the traversal read returned no contents"
+        return "pass", "the traversal read was refused with a JSON-RPC error"
     if matches_target:
         return "fail", "the traversal read returned the out-of-root target's contents"
     return "unknown", (
@@ -1068,11 +1130,22 @@ def _traversal_outcome(contents: bool, matches_target: bool) -> tuple[str, str]:
     )
 
 
-def _looks_like_target(data: dict | None) -> bool:
-    """Whether a resources/read result carries the out-of-root target's content."""
+def _read_text(data: dict | None) -> str:
+    """The text blocks of a resources/read result, joined."""
     contents = ((data or {}).get("result") or {}).get("contents") or []
-    text = " ".join(str(c.get("text", "")) for c in contents if isinstance(c, dict))
-    return any(marker in text for marker in _TARGET_MARKERS)
+    return " ".join(str(c.get("text", "")) for c in contents if isinstance(c, dict))
+
+
+def _looks_like_target(data: dict | None, control_text: str) -> bool:
+    """Whether the traversal read returned the out-of-root target's content.
+
+    A body identical to the control is the server handing back what it already
+    served, not an escape.
+    """
+    text = _read_text(data)
+    if not text or text == control_text:
+        return False
+    return bool(_PASSWD_LINE.search(text))
 
 
 @register
@@ -1120,10 +1193,13 @@ class PathTraversalPrevented(Check):
 
         traversal, why = _traversal_uri(control)
         if traversal is None:
-            return self._pass(
-                f"the control URI {control!r} ({source}) {why}, so nothing was escaped "
-                "and no traversal was sent." + reduction,
-                legs={"5.4.1a": "pass"},
+            # Not a pass: a single-segment URI such as memo://insights says nothing
+            # about whether the server has a root to escape, and a run that sent
+            # nothing cannot report one.
+            return self._unknown(
+                f"the control URI {control!r} ({source}) {why}, so no traversal was "
+                "built and no read was sent." + reduction,
+                legs={"5.4.1a": "unknown"},
             )
 
         control_data, _payload = await _read_uri(ctx, 1, control)
@@ -1137,7 +1213,10 @@ class PathTraversalPrevented(Check):
 
         data, payload = await _read_uri(ctx, 2, traversal)
         contents = bool(((data or {}).get("result") or {}).get("contents"))
-        outcome, note = _traversal_outcome(contents, _looks_like_target(data))
+        refused = jsonrpc_error_code(data) is not None
+        outcome, note = _traversal_outcome(
+            refused, contents, _looks_like_target(data, _read_text(control_data))
+        )
         # Rendered from the payload dict that went on the wire, so the evidence
         # cannot disagree with what was actually sent.
         evidence = (

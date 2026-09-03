@@ -79,10 +79,23 @@ def missing_input_notice(domain: str, entry: dict) -> str | None:
         # property from what the operator supplied, and never invents the rest.
         missing.append("5.1.1d (no schema_probe_arguments)")
     if not entry.get("traversal_control_uri"):
-        missing.append("5.4.1a (no traversal_control_uri)")
-    if not missing:
+        # Not "will record unknown": 5.4.1a falls back to the first advertised
+        # resource and still sends a traversal probe. The notice is what an operator
+        # actually reads before authorising a run against a third party.
+        traversal_note = (
+            "5.4.1a (no traversal_control_uri) will derive its control from the first "
+            "advertised resource and still send a traversal probe"
+        )
+    else:
+        traversal_note = ""
+    if not missing and not traversal_note:
         return None
+    parts = []
+    if missing:
+        parts.append(f"{'; '.join(missing)} will record unknown")
+    if traversal_note:
+        parts.append(traversal_note)
     return (
         f"probe-inputs.json has no entry (or an incomplete one) for {domain!r}: "
-        f"{'; '.join(missing)} will record unknown. See {PATH}."
+        f"{'. '.join(parts)}. See {PATH}."
     )
