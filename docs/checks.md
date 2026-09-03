@@ -770,6 +770,168 @@ explicitly the enforcement point".
 No Section 4 module exists. Ten not-applicable entries would add code and no coverage,
 so the section is recorded here instead.
 
+## Section 5 — server configuration
+
+Ten recommendations. Five are probed on the wire. Five are entirely operator-side and
+report `N/A`, naming the blocker each would need.
+
+Where Section 4 governs the host, Section 5 governs the server — the only side a
+client sees — so it is the best-matched section this probe has taken so far. The
+matrix below is nonetheless mostly undecided, and the reasons are stated under it
+rather than left for a reader to infer.
+
+**One scope note applies to every check that reads an advertised inventory.** Discovery
+reads a single page and does not retain the pagination cursor, so a verdict covers page
+one of the tool, resource, template or prompt inventory. Every affected evidence string
+says so. A server holding a defect on a later page is unexamined, and the probe cannot
+tell whether a later page exists.
+
+### 5.1.1 Tool schemas and argument types are validated
+
+**What the check requires.** Every advertised input and output schema compiles under the
+JSON Schema dialect it declares, defaulting to 2020-12. A call whose arguments violate
+the schema is surfaced as a tool execution error, deliberately not as a protocol error,
+so a model can correct itself.
+
+**How the probe implements it.** It compiles each advertised `inputSchema` and each
+declared `outputSchema`, selecting the validator from the schema's own `$schema` through
+an explicit table of the four dialects the revision permits. The table is explicit
+because the validation library falls back to its newest dialect on an unrecognised
+value, which would grade a schema under rules it never declared; an unrecognised dialect
+reports `UNKNOWN` and names the value instead.
+
+A schema carrying an external reference is reported as evidence only, never as a
+verdict. Such a schema compiles cleanly, so the count exists to bound what the compile
+proved: it succeeded with that reference unresolved.
+
+**What was reduced.** Schema depth limits, validation-time limits, and whether the
+server sanitizes schema fields before presenting them to a model, all have no wire
+signature. The execution-error test needs an operator to name a tool and supply a valid
+argument object, because the probe removes one required property from what the operator
+supplied and never invents a payload the operator has not seen. Without that input the
+leg reports `UNKNOWN` and no tool is called.
+
+Two codes earn a failure on that leg, `-32602` and `-32600`. Any other code, an
+authorization error, or a gateway 500 reports `ERROR`: none of them shows the server
+chose a protocol error over an execution error.
+
+### 5.1.2 Resource templates with explicit URI patterns and MIME types
+
+**What the check requires.** Every resource template declares a non-empty URI pattern
+and an explicit MIME type, and a read of a non-existent resource is rejected with
+`-32602`.
+
+**How the probe implements it.** It reads the advertised templates, then reads a URI
+built by substituting an implausible value into one of them. A concrete resource is read
+first as a positive control: without it, a server that refuses every read is
+indistinguishable from one that enforces existence. A legacy `-32002` passes with the
+code named. Any other error code passes with the deviation named, because the server
+refused attributably and which rule fired is ambiguous rather than absent.
+
+**Note on strictness.** Requiring a MIME type is stricter than base MCP, which makes the
+field optional. The evidence says so, so a failure is not read as a protocol defect.
+
+**What was reduced.** A wrongly-typed MIME type is not observable — such a document
+fails parsing before the probe sees it — so the check catches an absent or empty value
+only. Whether the server validates a substituted value before building the final URI is
+internal. The approved-namespace and content-type-sniffing requirements both depend on
+deployment intent the probe cannot read, and the recommendation states both as a
+stricter posture rather than a base-protocol requirement.
+
+### 5.1.3 Prompt templates declare and validate their arguments
+
+**What the check requires.** Every declared prompt argument names its parameter and, where
+it marks the argument required, uses a boolean. An invalid prompt name or a missing
+required argument is rejected with `-32602`.
+
+**How the probe implements it.** It reads the prompt list **as raw JSON** rather than
+through the parsed client model. That is load-bearing: the model layer coerces
+`"yes"`, `"1"`, `1` and `1.0` to `true`, so a check reading the parsed value would report
+a pass on the exact non-conformance it exists to detect. Reading raw also makes a
+non-string argument name observable.
+
+It then sends two `prompts/get` calls, one omitting a required argument and one naming a
+prompt that does not exist. Both are attributed by a control call that must succeed
+first. The control matters for the invalid-name leg too: answering a prompt listing says
+nothing about `prompts/get` being implemented, and a server refusing every such call
+would otherwise pass.
+
+**What was reduced.** A placeholder is not a valid value for every argument, so a control
+call can legitimately fail; the leg then reports `UNKNOWN` and names the failure. Whether
+prompt logic runs only on an explicit call, and whether each invocation records the
+prompt name, are both server-internal.
+
+### 5.2.3 Legacy Streamable HTTP session and stream resumption are disabled
+
+**What the check requires.** Under revision 2026-07-28 a server answers a standalone `GET`
+or `DELETE` on its MCP endpoint with `405`, ignores a resumption header while still
+serving the request, and neither mints nor echoes a session identifier.
+
+**How the probe implements it.** Four probes, each pinning the protocol version. The
+version header is not optional here: a server supporting both revisions would answer an
+unpinned request under the older semantics — correctly — and earn a failure it did not
+deserve. The session-identifier leg reads the **response** headers rather than the value
+the client library recorded, because that value cannot distinguish a header the server
+minted from one the transport carried. The `DELETE` deliberately carries no session
+identifier: it would end the live session and starve every check that runs after it.
+
+**Revision gate.** The check is valid only for 2026-07-28, because under an older revision
+the opposite behaviour is correct. It reports `NO-REV` when the server names an older
+revision, and `UNKNOWN` when the probe's own version offer went unanswered — the second
+is a limit of the run rather than a property of the server, and reporting `NO-REV` there
+would assert something the probe did not observe.
+
+**What was reduced.** The resumption leg is close to vacuous and its evidence says so:
+resumption changes replay on a stream rather than whether a request returns a result, so
+a server that still supports it also passes. Whether a streamed response is scoped to the
+request that originated it needs a second identity, which this probe does not have.
+
+### 5.4.1 Path traversal and arbitrary filesystem access are prevented
+
+**What the check requires.** Every supplied path is canonicalized before any access check,
+compared by path component rather than by string prefix, with the symbolic-link path
+guarded independently of the `../` path.
+
+**How the probe implements it.** It reads a control resource that must return content,
+then reads a URI built from it by inserting `../` segments aimed at a target outside any
+plausible root. The URI is assembled by string concatenation only: the standard URL types
+apply dot-segment removal on construction, so building it any other way would strip the
+traversal before the request left and silently substitute a different test that a
+non-conformant server passes.
+
+Returned content alone is not a failure. Dot-segment removal is mandatory and standard,
+so a conformant server may resolve the URI to a different in-root resource and serve it
+legitimately. The failure requires content matching the out-of-root target. The evidence
+is rendered from the request that was actually sent, so it cannot disagree with it.
+
+**Disclosure — what this probe looks like from the far side.** This is the only check in
+the section that sends an attack payload. The traversal string appears in the target's own
+logs and any abuse pipeline as an attempted path traversal, attributed to whichever
+identity the probe authenticated as — in an authorized run, the operator's own account.
+The probe sends no consent signal and asks no permission. Where no resource URI is
+supplied by the operator, the control is derived from the first resource the server
+advertises, so the probe can reach this path with no operator input at all. Plausible
+outcomes include an abuse report or a blocked client, either of which would end the
+ability to probe that server. Operators running this against a third party should expect
+that and decide in advance.
+
+**What was reduced.** The symbolic-link path is not probed: staging one is filesystem
+write access on the server host. Canonicalization resolves symbolic links and `../`
+independently, so a pass here says nothing about the symbolic-link path — this is the
+larger half of the requirement. Applying the same probe to every tool that accepts a path
+argument is excluded on side-effect grounds rather than reach: it would mean calling an
+arbitrary tool surface with traversal values.
+
+### The five not probed
+
+| Control | Why the probe cannot decide it |
+|---|---|
+| 5.2.1 listChanged rate limiting | The emission rate over time lives in the server's log, and no external client can provoke a capability change to time two of them. The minimum interval is a deployment choice the specification does not define, so there is no protocol default either. |
+| 5.2.2 Sessions are not authentication | Needs a continuity handle captured from an authorized session and a tool that accepts one as an argument. The recommendation is explicit that the handle is an application value rather than a protocol field, so nothing observable identifies such a tool. The adjacent property — an unauthenticated request reaching a response — is already decided by check 2.3. |
+| 5.3.1 Logs separated in stdio mode | A transport mismatch, not a missing capability: the check applies to the stdio transport, and this probe speaks HTTP to a remote endpoint and never launches a server process. |
+| 5.5.1 Task authorization | Cross-identity retrieval needs a second identity's credential. Task enumeration was removed in this revision, so an existing task cannot be found, and a retention period cannot be read without creating one. The evidence does record whether the server declares the Tasks capability. |
+| 5.6.1 Idempotency keys | Every wire test executes a side-effecting tool, and no observation identifies a reversible one. Separately, the idempotency header and its cached-result indicator are conventions this recommendation defines rather than MCP fields, so a failure against a server that never adopted them would be unearned. |
+
 ## Results against tested servers
 
 Sections 1 and 2 were probed on 2026-08-12 against hosted MCP servers, using the
@@ -909,6 +1071,53 @@ Linear's column comes from the authenticated run of 2026-08-27.
 No Section 3 leg depends on protocol revision 2026-07-28, so no Section 3 check
 reports `NO-REV`. Stripe negotiates 2025-03-26, the oldest revision of the three,
 and still serves RFC 9728 metadata that every discovery leg reads.
+
+### Section 5 results
+
+Probed 2026-09-03 against DeepWiki. The three servers that require a browser login are
+not yet probed for this section, so their columns are marked `—`.
+
+| # | Check | deepwiki | linear | sentry | stripe |
+|---|---|---|---|---|---|
+| — | **Negotiated revision** | **2025-11-25** | — | — | — |
+| 5.1.1 | Tool schemas validated | UNKNOWN | — | — | — |
+| 5.1.2 | Resource templates declared | UNKNOWN | — | — | — |
+| 5.1.3 | Prompt arguments declared and validated | UNKNOWN | — | — | — |
+| 5.2.3 | Legacy session and stream surface disabled | NO-REV | — | — | — |
+| 5.4.1 | Path traversal prevented | UNKNOWN | — | — | — |
+| 5.2.1 | listChanged rate limited | N/A | N/A | N/A | N/A |
+| 5.2.2 | Sessions not used as authentication | N/A | N/A | N/A | N/A |
+| 5.3.1 | Logs separated in stdio mode | N/A | N/A | N/A | N/A |
+| 5.5.1 | Task authorization enforced | N/A | N/A | N/A | N/A |
+| 5.6.1 | Idempotency keys required | N/A | N/A | N/A | N/A |
+
+### Reading the Section 5 results
+
+**Section 5 produced no `PASS` and no `FAIL` against DeepWiki.** That is the honest
+outcome and it needs stating plainly, because a column of `UNKNOWN` can be misread as the
+checks being broken. Four separate reasons, none of them a defect in a check:
+
+- **5.2.3 reports `NO-REV` because no tested server negotiates 2026-07-28.** The whole
+  check describes behaviour that revision introduced; under an older one the opposite is
+  correct. Check 2.4 reads `NO-REV` on the same four servers for the same reason.
+- **5.1.2, 5.1.3 and 5.4.1 have nothing to read.** DeepWiki declares the resources and
+  prompts capabilities and then advertises no resource, no template and no prompt. The
+  evidence distinguishes that from a server declaring no capability at all, because the
+  two describe different servers and only the second means the surface does not exist.
+- **5.1.1 decided both of its schema legs and still reports `UNKNOWN`.** All three of
+  DeepWiki's tools compile, and all three declare an output schema, so those two legs
+  pass. The execution-error leg needs an operator-supplied tool and argument object,
+  reports `UNKNOWN` without one, and a check carries the weakest of its parts.
+- **The five operator-side checks report `N/A`** on every server, which is what they will
+  always report.
+
+**5.2.3 was verified against local fixtures instead.** No available server exercises it,
+so a compliant fixture confirms the four probes pass together and a deliberately
+non-compliant one confirms they fail — the second matters more, because a check that only
+ever passes has not been shown to discriminate. A third variant, minting a session
+identifier on the handshake alone, confirms the check reads response headers rather than
+recorded client state. Those fixtures test this probe's logic. They say nothing about the
+ecosystem, and the matrix above is what the ecosystem says.
 
 ### Reading the Section 3 results
 
