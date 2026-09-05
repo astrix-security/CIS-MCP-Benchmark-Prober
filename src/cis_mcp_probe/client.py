@@ -540,12 +540,14 @@ async def connect_and_probe(
     *,
     force_reauth: bool = False,
     update_baseline: bool = False,
+    active_probing: bool = False,
     timeout: float = 30.0,
 ) -> tuple[ProbeContext, list[CheckResult]]:
     """Connect to ``domain``, authenticate if needed, enumerate, and run checks."""
     host, base_url, candidates = normalize(domain)
     ctx = ProbeContext(
-        domain=domain, base_url=base_url, update_baseline=update_baseline
+        domain=domain, base_url=base_url, update_baseline=update_baseline,
+        active_probing=active_probing,
     )
 
     # --- Transport-level evidence (no MCP session needed) ---
