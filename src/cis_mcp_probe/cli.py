@@ -49,6 +49,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--timeout", type=float, default=30.0, help="per-request timeout seconds"
     )
+    p.add_argument(
+        "--active",
+        action="store_true",
+        help="enable active, non-read-only probe legs (3.3.1b re-mints and "
+        "replays a wrong-audience token, 3.3.4e invokes a named tool). Use only "
+        "against servers you operate. Off by default; those legs record unknown.",
+    )
     return p.parse_args(argv)
 
 
@@ -80,6 +87,7 @@ async def _run(args: argparse.Namespace) -> int:
             checks,
             force_reauth=args.reauth,
             update_baseline=args.update_baseline,
+            active_probing=args.active,
             timeout=args.timeout,
         )
         runs.append(ProbeRun(ctx=ctx, results=results))

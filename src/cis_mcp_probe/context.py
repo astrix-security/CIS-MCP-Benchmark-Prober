@@ -65,6 +65,13 @@ class ProbeContext:
     # refresh it instead of comparing against it.
     update_baseline: bool = False
 
+    # When False (default), checks that would take an active, non-read-only
+    # action against a third-party server (re-minting a wrong-audience token,
+    # invoking a named tool) skip that leg and record it as unknown with a
+    # disclosure. Set True only for targets the operator controls (lab, or a
+    # server they own), via the --active CLI flag.
+    active_probing: bool = False
+
     # Handshake / capability inventory.
     init_result: "types.InitializeResult | None" = None
     tools: list["types.Tool"] = field(default_factory=list)

@@ -852,12 +852,23 @@ class ScopeMinimization(Check):
                 )
             )
 
-        # 3.3.4e
-        entry = inputs.load(ctx.domain)
-        outcome, note = await self._call_named_tool(
-            ctx, entry.get("scope_probe_tool"), entry.get("scope_probe_arguments") or {}
-        )
-        results.append(("3.3.4e", outcome, note))
+        # 3.3.4e invokes a named tool the operator marks as outside the grant, an
+        # active, non-read-only action, so it runs only when active probing is
+        # opted in for an operator-controlled target.
+        if ctx.active_probing:
+            entry = inputs.load(ctx.domain)
+            outcome, note = await self._call_named_tool(
+                ctx, entry.get("scope_probe_tool"), entry.get("scope_probe_arguments") or {}
+            )
+            results.append(("3.3.4e", outcome, note))
+        else:
+            results.append((
+                "3.3.4e",
+                "unknown",
+                "skipped: invoking a named tool is an active operation against "
+                "the server, held back unless --active is set for an "
+                "operator-controlled target",
+            ))
 
         # 3.3.4f — either document can be the one this run never read, so the
         # protected-resource attempts are consulted too. A document that answered
@@ -2196,7 +2207,19 @@ class AudienceBinding(Check):
         legs.append(("3.3.1c", outcome, note))
 
         # 3.3.1b runs last: the refresh grant can rotate the cached refresh token.
-        legs.append(("3.3.1b", *await self._leg_wrong_resource(ctx)))
+        # It asks the authorization server to mint a token bound to a different
+        # resource and replays it, an active, non-read-only action against a
+        # third-party server, so it runs only when active probing is opted in.
+        if ctx.active_probing:
+            legs.append(("3.3.1b", *await self._leg_wrong_resource(ctx)))
+        else:
+            legs.append((
+                "3.3.1b",
+                "unknown",
+                "skipped: re-minting a wrong-audience token and replaying it is "
+                "an active operation against the authorization server, held back "
+                "unless --active is set for an operator-controlled target",
+            ))
 
         details: dict[str, Any] = {
             "legs": {leg: outcome for leg, outcome, _ in legs},

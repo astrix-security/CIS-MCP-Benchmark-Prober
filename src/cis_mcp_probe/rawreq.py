@@ -183,6 +183,16 @@ async def raw_get(
     return await _guarded_fetch("GET", url, token=token, timeout=timeout)
 
 
+async def raw_delete(
+    url: str,
+    *,
+    token: str | None = None,
+    timeout: float = 8.0,
+) -> tuple[int | None, dict[str, str], str, str | None]:
+    """DELETE a URL through the host guard, returning any redirect unresolved."""
+    return await _guarded_fetch("DELETE", url, token=token, timeout=timeout)
+
+
 async def raw_post_form(
     url: str,
     data: dict[str, str],

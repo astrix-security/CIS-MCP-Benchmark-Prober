@@ -1,23 +1,8 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
-# CIS benchmark source PDFs (draft/confidential — do not commit)
-/benchmark/
-
-# Benchmark spreadsheets, wherever they land. Draft revisions arrive as .xlsx in
-# the repository root, which /benchmark/ does not cover.
-*.xlsx
-
-# Local worktrees for feature branches
-.worktrees/
-
-# Browser automation scratch output: page snapshots can capture draft content
-.playwright-mcp/
+ecosystem_probe_*.json
+ecosystem_full_*.json
+ecosystem_full_*.txt
+part2_sdk_run.json
+phase3_agreement_run.tsv
+phase3_runner.py
+section3_probe_*.txt
+servers.txt
