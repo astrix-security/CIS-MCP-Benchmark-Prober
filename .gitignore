@@ -6,3 +6,5 @@ phase3_agreement_run.tsv
 phase3_runner.py
 section3_probe_*.txt
 servers.txt
+__pycache__/
+*.pyc
