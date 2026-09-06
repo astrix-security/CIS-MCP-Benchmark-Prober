@@ -1074,17 +1074,17 @@ and still serves RFC 9728 metadata that every discovery leg reads.
 
 ### Section 5 results
 
-Probed 2026-09-03 against DeepWiki. The three servers that require a browser login are
-not yet probed for this section, so their columns are marked `—`.
+Probed 2026-09-06 against all four servers.
 
 | # | Check | deepwiki | linear | sentry | stripe |
 |---|---|---|---|---|---|
-| — | **Negotiated revision** | **2025-11-25** | — | — | — |
-| 5.1.1 | Tool schemas validated | UNKNOWN | — | — | — |
-| 5.1.2 | Resource templates declared | UNKNOWN | — | — | — |
-| 5.1.3 | Prompt arguments declared and validated | UNKNOWN | — | — | — |
-| 5.2.3 | Legacy session and stream surface disabled | NO-REV | — | — | — |
-| 5.4.1 | Path traversal prevented | UNKNOWN | — | — | — |
+| — | **Negotiated revision** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-03-26** |
+| — | *Tools / resources / templates / prompts* | *3 / 0 / 0 / 0* | *61 / 0 / 0 / 0* | *9 / 0 / 0 / 0* | *10 / 1 / 0 / 0* |
+| 5.1.1 | Tool schemas validated | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+| 5.1.2 | Resource templates declared | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+| 5.1.3 | Prompt arguments declared and validated | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+| 5.2.3 | Legacy session and stream surface disabled | NO-REV | NO-REV | NO-REV | NO-REV |
+| 5.4.1 | Path traversal prevented | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
 | 5.2.1 | listChanged rate limited | N/A | N/A | N/A | N/A |
 | 5.2.2 | Sessions not used as authentication | N/A | N/A | N/A | N/A |
 | 5.3.1 | Logs separated in stdio mode | N/A | N/A | N/A | N/A |
@@ -1093,100 +1093,43 @@ not yet probed for this section, so their columns are marked `—`.
 
 ### Reading the Section 5 results
 
-**Section 5 produced no `PASS` and no `FAIL` against DeepWiki.** That is the honest
-outcome and it needs stating plainly, because a column of `UNKNOWN` can be misread as the
-checks being broken. Four separate reasons, none of them a defect in a check:
+**No check decided on any server.** Every probed check reports `UNKNOWN` or `NO-REV`, and every
+operator-side one reports `N/A`. That is the honest outcome and it needs saying plainly, because a
+matrix of `UNKNOWN` reads as broken checks otherwise. Four separate causes, none a defect:
 
-- **5.2.3 reports `NO-REV` because no tested server negotiates 2026-07-28.** The whole
-  check describes behaviour that revision introduced; under an older one the opposite is
-  correct. Check 2.4 reads `NO-REV` on the same four servers for the same reason.
-- **5.1.2, 5.1.3 and 5.4.1 have nothing to read.** DeepWiki declares the resources and
-  prompts capabilities and then advertises no resource, no template and no prompt. The
-  evidence distinguishes that from a server declaring no capability at all, because the
-  two describe different servers and only the second means the surface does not exist.
-- **5.1.1 decided both of its schema legs and still reports `UNKNOWN`.** All three of
-  DeepWiki's tools compile, and all three declare an output schema, so those two legs
-  pass. The execution-error leg needs an operator-supplied tool and argument object,
-  reports `UNKNOWN` without one, and a check carries the weakest of its parts.
-- **The five operator-side checks report `N/A`** on every server, which is what they will
-  always report.
+- **No server negotiates 2026-07-28**, so 5.2.3 reports `NO-REV` on all four. The recommendation
+  describes behaviour that revision introduced; under an older one the opposite is correct. Check
+  2.4 reads `NO-REV` on the same four servers for the same reason.
+- **No server advertises a resource template or a prompt.** Three declare the corresponding
+  capabilities and populate none of them, and the evidence distinguishes that from declaring no
+  capability at all, because the two describe different servers. So 5.1.2 and 5.1.3 have nothing to
+  read on any target.
+- **5.1.1's schema legs all passed and the check still reports `UNKNOWN`.** Its remaining leg needs
+  an operator-supplied tool and argument object, reports `UNKNOWN` without one, and a check carries
+  the weakest of its parts.
+- **The five operator-side checks report `N/A`** everywhere, which is what they will always report.
 
-**5.2.3 was verified against local fixtures instead.** No available server exercises it,
-so a compliant fixture confirms the four probes pass together and a deliberately
-non-compliant one confirms they fail — the second matters more, because a check that only
-ever passes has not been shown to discriminate. A third variant, minting a session
-identifier on the handshake alone, confirms the check reads response headers rather than
-recorded client state. Those fixtures test this probe's logic. They say nothing about the
-ecosystem, and the matrix above is what the ecosystem says.
+**What did decide, underneath the check verdicts.** The legs are where the measurement lives:
 
-### Reading the Section 3 results
+- **83 tool input schemas compiled with no failure** — 3 on DeepWiki, 61 on Linear, 9 on Sentry, 10
+  on Stripe. None declared an unrecognised dialect, and none carried an external reference.
+- **Output schemas are declared inconsistently.** DeepWiki, Sentry and Stripe declare one on every
+  tool; Linear declares none on any of its 61. So that leg decides on three servers and reports
+  `UNKNOWN` on the fourth, rather than being vacuous either way.
 
-- **3.1.2 — 1/3 pass, and the two failures fail for opposite reasons.** DeepWiki
-  requires no authentication, so an unauthenticated request reached a response and
-  leg `3.1.2a` fails. Linear refuses correctly and names `resource_metadata`, then
-  fails leg `3.1.2b`: its issued lifetime is 86100 seconds against the 3600-second
-  baseline. Stripe passes all four legs: it refuses with a 401 naming
-  `resource_metadata`, and its issued lifetime is exactly 3600 seconds.
-- **DeepWiki is `N/A` on all six OAuth checks.** Every discovery path answered a
-  clean 404 and no request drew a 401 challenge, so the server states it offers no
-  OAuth. That is an observed absence, not an undecided run, which is why these are
-  `N/A` rather than `UNKNOWN`.
-- **3.2.2 and 3.3.1 are `UNKNOWN` on Linear because its access token is opaque.** No
-  `aud` claim is readable, so neither audience leg can be observed. Leg `3.3.1c`
-  probed ten candidates on `api.linear.app` and `linear.app`; each answered the
-  same with and without the token, so none produced a usable comparison. Leg
-  `3.3.1b` reached the wire and got the conforming answer: Linear's authorization
-  server refused to mint a token for the wrong-audience resource with
-  `invalid_target`, which is RFC 8707 enforcement, and which leaves Linear's own
-  audience validation untested.
-- **3.3.4 is `UNKNOWN` on Linear because leg `3.3.4e` has no operator input.** No tool
-  is named as outside the grant, so no out-of-scope call was made. The other legs
-  decided: granted scopes `read write`, no wildcard, within the recorded baseline,
-  and the advertised surface carries no admin-tier scope.
-- **3.3.2 passes on Linear.** Two discovery paths answered and serve the same
-  document, both over https, the advertised `resource` equals the canonical URI,
-  one authorization server is advertised, it is in the recorded baseline, and its
-  published `issuer` string-equals the advertised entry. Linear's challenge
-  `resource_metadata` equals its sub-path well-known URL, so the three URLs a
-  client may try collapse to two documents.
-- **3.2.2 and 3.3.1 are `UNKNOWN` on Stripe too, and its access token is opaque as
-  well.** Leg `3.3.1c` produced the one live pass of that leg so far:
-  `https://api.stripe.com/v1/account` answered 401 to the MCP token while answering
-  differently without it, so a downstream API on the same registrable domain
-  refused a credential minted for the MCP server. The other nine candidates
-  answered the same either way and decided nothing. Leg `3.3.1b` is `UNKNOWN` for a
-  reason of its own: the endpoint refused the control request carrying the probe's
-  own token, so no refusal of a differently-bound token would have been
-  attributable to audience validation.
-- **3.3.4 is `UNKNOWN` on Stripe on two legs.** Granted scope is `mcp`, no wildcard,
-  and within the recorded baseline. `3.3.4d` is undecided because the
-  protected-resource document advertises no `scopes_supported` at all, and `3.3.4e`
-  because no operator input names a tool outside the grant.
-  `3.3.4f` passed on the third discovery source alone: the challenge carried no
-  `scope`, the protected-resource `scopes_supported` was absent, and the
-  authorization server advertised `['mcp']`. A check that consulted only the first
-  two sources would have failed a working server.
-- **3.3.2 passes on Stripe, and it took two runs.** Six legs passed on the first
-  run: TLS, one answering discovery path, https, an advertised `resource` that is a
-  hierarchical parent of the canonical URI, one advertised authorization server, and
-  a published `issuer` that string-equals it. Leg `3.3.2f` was undecided, because no
-  baseline held an `authorization_servers` category for this endpoint. A run with
-  `--update-baseline` recorded `['https://access.stripe.com/mcp']`, and the next run
-  compared against it and passed. `3.3.2f` is the one leg here that reports on drift
-  rather than on a property of a single run, so it needs two runs by construction.
-- **3.3.5 is `N/A` on all three targets, and each reaches that verdict differently.**
-  DeepWiki serves no authorization-server metadata at all. Linear's authorization
-  endpoint is `https://mcp.linear.app/authorize`, on the MCP endpoint's own host, so
-  it authorizes for itself and fronts nothing; the gate settled that from metadata
-  alone, and neither of those two targets left a scratch client in the token store.
-  Stripe is the one target whose metadata gate opened: its authorization server is
-  `https://access.stripe.com/mcp`, a separate host, so the probe registered two
-  clients and compared what each authorize response carried onward. Both answered
-  302, and neither `Location` carried a `client_id`. With no shared static client id
-  established, the recommendation is vacuous for it and the three test legs never
-  ran.
+**No traversal payload was sent to any server.** 5.4.1 requires a control read returning content
+before it sends anything, and no target provided one: three advertise no resource at all, and
+Stripe's single resource — a UI widget — returned no content to a plain read. So the check reports
+`UNKNOWN` on all four, and the disclosure above describes a capability that, on this target set, was
+never exercised.
 
-### Section 3 coverage gaps
+**5.2.3 was verified against local fixtures instead.** No available server exercises it, so a
+compliant fixture confirms the four probes pass together and a deliberately non-compliant one
+confirms they fail — the second matters more, because a check that only ever passes has not been
+shown to discriminate. A third variant, minting a session identifier on the handshake alone,
+confirms the check reads response headers rather than recorded client state. Those fixtures test
+this probe's logic. They say nothing about the ecosystem, and the matrix above is what the ecosystem
+says.
 
 Ten checks reporting verdicts do not mean the coverage is complete. Six gaps
 remain, and each names what closing it needs.
