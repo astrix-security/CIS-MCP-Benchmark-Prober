@@ -62,6 +62,19 @@ def _payload(method: str, params: dict[str, Any] | None = None, *, req_id: int =
     return {"jsonrpc": "2.0", "id": req_id, "method": method, "params": p}
 
 
+def _capability_absent(data: dict[str, Any] | None) -> bool:
+    """True when a list response is a 'this capability does not exist' signal
+    rather than a transport failure: JSON-RPC method-not-found (-32601) or an
+    invalid-request naming an unknown method. Such a server simply does not
+    expose that surface, which is NOT_APPLICABLE, not an error on our side."""
+    if not data:
+        return False
+    err = data.get("error")
+    if isinstance(err, dict) and err.get("code") in (-32601, -32600):
+        return True
+    return False
+
+
 async def _call(ctx: ProbeContext, method: str, params: dict[str, Any] | None = None,
                 *, req_id: int = 1, mcp_name: str | None = None):
     headers = {"Mcp-Method": method}
@@ -92,6 +105,8 @@ class ToolSchemaDeclaration(Check):
         if not ctx.endpoint_url:
             return self._error("no endpoint to read tools/list from")
         status, data, _ = await _call(ctx, "tools/list")
+        if _capability_absent(data):
+            return self._na("the server does not expose tools (method not found)")
         if data is None or not isinstance(data.get("result"), dict):
             return self._error(
                 f"tools/list returned no readable result (HTTP {status}); no verdict attributable"
@@ -150,6 +165,8 @@ class ResourceTemplateDeclaration(Check):
         if not ctx.endpoint_url:
             return self._error("no endpoint to read resources/templates/list from")
         status, data, _ = await _call(ctx, "resources/templates/list")
+        if _capability_absent(data):
+            return self._na("the server does not expose resource templates (method not found)")
         if data is None or not isinstance(data.get("result"), dict):
             return self._error(
                 f"resources/templates/list returned no readable result (HTTP {status})"
@@ -198,6 +215,8 @@ class PromptArgumentDeclaration(Check):
         if not ctx.endpoint_url:
             return self._error("no endpoint to read prompts/list from")
         status, data, _ = await _call(ctx, "prompts/list")
+        if _capability_absent(data):
+            return self._na("the server does not expose prompts (method not found)")
         if data is None or not isinstance(data.get("result"), dict):
             return self._error(f"prompts/list returned no readable result (HTTP {status})")
         prompts = data["result"].get("prompts")
