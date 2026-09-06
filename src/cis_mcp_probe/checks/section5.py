@@ -15,6 +15,12 @@ black-box probe sees. Five of the ten recommendations yield a check:
 * 5.4.1 - a resource read that escapes the approved root is denied.
 
 The other five are operator-side and return NOT_APPLICABLE with the reason.
+
+Legs live at module level here, where section3 makes them methods on the check. The
+reason is testability: the regression block runs inside this module's namespace, so a
+module-level leg is directly callable while a method needs the check instantiated.
+Section 3's sixteen legs are unreached by its own block for that reason; all eleven
+here are driven.
 """
 
 from __future__ import annotations
@@ -342,7 +348,7 @@ def _resolve_probe_tool(
     return (name, violating, why), ""
 
 
-def _leg_5111a(ctx: ProbeContext) -> tuple[str, str, str]:
+def _leg_input_schemas(ctx: ProbeContext) -> tuple[str, str, str]:
     """Every advertised inputSchema compiles under its declared dialect."""
     state, note = _inventory_state(ctx, "tools")
     if state == 0:
@@ -363,7 +369,7 @@ def _leg_5111a(ctx: ProbeContext) -> tuple[str, str, str]:
     return "5.1.1a", "pass", f"{len(ctx.tools)} inputSchema(s) compiled"
 
 
-def _leg_5111b(ctx: ProbeContext) -> tuple[str, str, str]:
+def _leg_output_schemas(ctx: ProbeContext) -> tuple[str, str, str]:
     """Every declared outputSchema compiles. None declared cannot pass."""
     state, note = _inventory_state(ctx, "tools")
     if state == 0:
@@ -385,7 +391,7 @@ def _leg_5111b(ctx: ProbeContext) -> tuple[str, str, str]:
     return "5.1.1b", "pass", f"{len(declared)} outputSchema(s) compiled"
 
 
-def _leg_5111c(ctx: ProbeContext) -> tuple[str, str, str]:
+def _leg_external_refs(ctx: ProbeContext) -> tuple[str, str, str]:
     """External $ref count. Evidence only: the requirement binds the server's own
     validator configuration, which nothing observable reaches."""
     names = [
@@ -413,7 +419,7 @@ def _leg_5111c(ctx: ProbeContext) -> tuple[str, str, str]:
 _PROTOCOL_INSTEAD_OF_EXECUTION = (-32602, -32600)
 
 
-async def _leg_5111d(ctx: ProbeContext) -> tuple[str, str, str]:
+async def _leg_violating_call(ctx: ProbeContext) -> tuple[str, str, str]:
     """A schema-violating call is surfaced as an execution error, not executed."""
     if ctx.session is None:
         return "5.1.1d", "error", "no live session to call a tool through"
@@ -478,11 +484,15 @@ class ToolSchemaValidation(Check):
     )
 
     async def run(self, ctx: ProbeContext) -> CheckResult:
-        results = [_leg_5111a(ctx), _leg_5111b(ctx), await _leg_5111d(ctx)]
+        results = [
+            _leg_input_schemas(ctx),
+            _leg_output_schemas(ctx),
+            await _leg_violating_call(ctx),
+        ]
         reduction = (
             " Not probed: schema depth and validation-time bounds and field "
             "sanitization have no wire signature. Evidence only: "
-            + _leg_5111c(ctx)[2]
+            + _leg_external_refs(ctx)[2]
             + "."
         )
         verdict, evidence, legs = _aggregate(
@@ -552,7 +562,7 @@ def _raw_prompts(raw: dict) -> list | None:
     return prompts if isinstance(prompts, list) else None
 
 
-def _leg_5112a(ctx: ProbeContext) -> tuple[str, str, str]:
+def _leg_uri_template(ctx: ProbeContext) -> tuple[str, str, str]:
     """Every advertised resource template declares a non-empty uriTemplate."""
     state, note = _inventory_state(ctx, "resource_templates")
     if state == 0:
@@ -575,7 +585,7 @@ def _leg_5112a(ctx: ProbeContext) -> tuple[str, str, str]:
     )
 
 
-def _leg_5112b(ctx: ProbeContext) -> tuple[str, str, str]:
+def _leg_mime_type(ctx: ProbeContext) -> tuple[str, str, str]:
     """Every advertised resource template declares an explicit MIME type."""
     state, note = _inventory_state(ctx, "resource_templates")
     if state == 0:
@@ -599,7 +609,7 @@ def _leg_5112b(ctx: ProbeContext) -> tuple[str, str, str]:
     )
 
 
-def _leg_5113a(raw: dict) -> tuple[str, str, str]:
+def _leg_argument_names(raw: dict) -> tuple[str, str, str]:
     """Every declared prompt argument names its parameter, read from raw JSON."""
     prompts = _raw_prompts(raw)
     if prompts is None:
@@ -621,7 +631,7 @@ def _leg_5113a(raw: dict) -> tuple[str, str, str]:
     return "5.1.3a", "pass", f"{len(prompts)} prompt(s) name every declared argument"
 
 
-def _leg_5113b(raw: dict) -> tuple[str, str, str]:
+def _leg_required_boolean(raw: dict) -> tuple[str, str, str]:
     """``required`` is a JSON boolean where present.
 
     Read raw, because Pydantic runs in lax mode and coerces "yes", "1", 1 and 1.0 to
@@ -666,7 +676,7 @@ async def _read_uri(
     return data, payload
 
 
-async def _leg_5112c(ctx: ProbeContext) -> tuple[str, str, str]:
+async def _leg_missing_resource(ctx: ProbeContext) -> tuple[str, str, str]:
     """A read of a non-existent resource is rejected."""
     if ctx.session is None:
         return "5.1.2c", "error", "no live session to read through"
@@ -727,7 +737,9 @@ async def _get_prompt(ctx: ProbeContext, req_id: int, name: str, args: dict) -> 
     return data or {}
 
 
-async def _leg_5113c(ctx: ProbeContext, raw: dict) -> tuple[str, str, str, bool]:
+async def _leg_missing_argument(
+    ctx: ProbeContext, raw: dict
+) -> tuple[str, str, str, bool]:
     """A prompts/get omitting a required argument is rejected.
 
     Returns a fourth value: whether the control call succeeded, which 5.1.3d needs.
@@ -765,7 +777,7 @@ async def _leg_5113c(ctx: ProbeContext, raw: dict) -> tuple[str, str, str, bool]
     return "5.1.3c", outcome, f"omitting a required argument of {name!r}: {note}", True
 
 
-async def _leg_5113d(
+async def _leg_invalid_prompt_name(
     ctx: ProbeContext, raw: dict, control_passed: bool
 ) -> tuple[str, str, str]:
     """An invalid prompt name is rejected.
@@ -809,7 +821,11 @@ class ResourceTemplateDeclarations(Check):
     )
 
     async def run(self, ctx: ProbeContext) -> CheckResult:
-        results = [_leg_5112a(ctx), _leg_5112b(ctx), await _leg_5112c(ctx)]
+        results = [
+            _leg_uri_template(ctx),
+            _leg_mime_type(ctx),
+            await _leg_missing_resource(ctx),
+        ]
         reduction = (
             " Not probed: substitution ordering is server-internal, and the "
             "approved-namespace and nosniff requirements depend on deployment intent "
@@ -854,12 +870,14 @@ class PromptArgumentDeclarations(Check):
         raw = await _prompts_raw(ctx)
         if _raw_prompts(raw) is None and state in (2, 3):
             return self._unknown(note, legs={})
-        label_c, outcome_c, note_c, control_passed = await _leg_5113c(ctx, raw)
+        label_c, outcome_c, note_c, control_passed = await _leg_missing_argument(
+            ctx, raw
+        )
         results = [
-            _leg_5113a(raw),
-            _leg_5113b(raw),
+            _leg_argument_names(raw),
+            _leg_required_boolean(raw),
             (label_c, outcome_c, note_c),
-            await _leg_5113d(ctx, raw, control_passed),
+            await _leg_invalid_prompt_name(ctx, raw, control_passed),
         ]
         reduction = (
             " Not probed: whether prompt logic runs only on an explicit prompts/get, "
