@@ -9,5 +9,6 @@ from . import section1  # noqa: F401  (imported for check registration side effe
 from . import section2  # noqa: F401  (imported for check registration side effect)
 from . import section3  # noqa: F401  (imported for check registration side effect)
 from . import section5  # noqa: F401  (imported for check registration side effect)
+from . import section7  # noqa: F401  (imported for check registration side effect)
 
 __all__ = ["Check", "CheckResult", "Level", "Status", "all_checks", "register"]
