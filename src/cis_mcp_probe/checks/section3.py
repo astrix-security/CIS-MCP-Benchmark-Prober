@@ -2405,6 +2405,11 @@ class AudienceBinding(Check):
                 "untested",
             )
 
+        # Keep the token for any later check that needs one bound elsewhere. A
+        # refresh grant can rotate the cached refresh token, so the run asks for
+        # exactly one such token and every reader shares it.
+        ctx.foreign_audience_token = minted
+
         # The request above spent the cached refresh token, and a server that
         # rotates has just replaced it. Re-establish the chain for the audited
         # resource before anything else, or the next run has no way to refresh.
