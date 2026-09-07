@@ -34,6 +34,7 @@ and no check after it reads that credential.
 from __future__ import annotations
 
 from ..context import ProbeContext
+from ..rawreq import raw_jsonrpc
 from .base import Check, CheckResult, Level, register
 
 SERVER_INFO_KEY = "io.modelcontextprotocol/serverInfo"
@@ -110,6 +111,124 @@ class LifecycleMetadata(Check):
             results_not_naming_server=unnamed,
             advertises_deprecated_logging=advertises_logging,
         )
+
+
+def _null_id_outcome(status: int, payload: dict | None) -> tuple[str, str]:
+    """Decide leg 7.1.2a from the response to a request carrying a null id.
+
+    The protocol states the rule directly: a request id must be a string or an
+    integer and must not be null. So a result is a failure and a refusal is not.
+
+    A refusal counts whatever status and code carry it, because a refusal is
+    positive evidence. Only the shape of the refusal is graded, and the observed
+    values are named so a reviewer can judge them. What cannot count is a bare
+    status with no JSON-RPC error object: a gateway in front of the server
+    produces exactly that, so it says nothing about the server itself.
+    """
+    if status in (401, 403):
+        return (
+            "unknown",
+            f"the request drew HTTP {status}, so it did not reach id validation and "
+            "the rule was never exercised",
+        )
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        if isinstance(payload, dict) and payload.get("result") is not None:
+            return (
+                "fail",
+                "the server accepted a null JSON-RPC request id and answered with "
+                "a result",
+            )
+        if 200 <= status < 300:
+            # A 2xx with no body is how Streamable HTTP acknowledges a notification.
+            # A message carrying id: null is not one, so the server took it for
+            # something it is not instead of refusing it. That is still an
+            # acceptance, and the evidence has to say which acceptance it was.
+            return (
+                "fail",
+                f"the server accepted a null JSON-RPC request id: HTTP {status} with "
+                "no response body, which is how an accepted notification is "
+                "acknowledged, rather than the refusal the rule requires",
+            )
+        return (
+            "error",
+            f"HTTP {status} carried no JSON-RPC error object, so the refusal cannot "
+            "be attributed to the server rather than to something in front of it",
+        )
+    code = error.get("code")
+    if status == 400 and code == -32600:
+        return (
+            "pass",
+            "the null request id was rejected with HTTP 400 and JSON-RPC -32600",
+        )
+    return (
+        "pass",
+        f"the null request id was rejected, with HTTP {status} and JSON-RPC {code} "
+        "rather than the 400 and -32600 the benchmark names",
+    )
+
+
+@register
+class NullRequestIdRejected(Check):
+    """7.1.2, Assessment Status: Automated.
+
+    One request, otherwise conformant, carrying a null id. Sent authenticated so
+    it reaches id validation rather than stopping at a 401.
+    """
+
+    id = "7.1.2"
+    title = "Non-null JSON-RPC request IDs are enforced and included in audit logs"
+    section = "7"
+    level = Level.L1
+    remediation = (
+        "Reject a request whose id is null, and one whose id collides with another "
+        "request still awaiting a response, with JSON-RPC error -32600 and HTTP "
+        "400. Record the request id on every audit-log entry so a logged event can "
+        "be tied back to the request that produced it."
+    )
+
+    async def run(self, ctx: ProbeContext) -> CheckResult:
+        if not ctx.endpoint_url:
+            return self._error("no endpoint was reached, so no request could be sent")
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": None,
+            "method": "tools/list",
+            "params": {},
+        }
+        try:
+            status, body, _text = await raw_jsonrpc(
+                ctx.endpoint_url,
+                payload,
+                token=ctx.access_token,
+                session_id=ctx.session_id,
+                protocol_header=ctx.negotiated_version,
+            )
+        except Exception as e:  # noqa: BLE001
+            return self._error(f"the null-id request could not be sent: {e!r}")
+
+        outcome, note = _null_id_outcome(status, body)
+        evidence = (
+            f"7.1.2a: {note}. Not covered: 7.1.2b, that an id colliding with an "
+            "outstanding request is refused, which discrete HTTP requests cannot "
+            "hold open to test; and 7.1.2c, that the request id reaches the audit "
+            "log, which is on the deployment host"
+        )
+        details: dict[str, object] = {
+            "legs": {"7.1.2a": outcome},
+            "http_status": status,
+            "jsonrpc_error": (body or {}).get("error")
+            if isinstance(body, dict)
+            else None,
+        }
+        if outcome == "fail":
+            return self._fail(evidence, **details)
+        if outcome == "error":
+            return self._error(evidence, **details)
+        if outcome == "unknown":
+            return self._unknown(evidence, **details)
+        return self._pass(evidence, **details)
 
 
 @register
