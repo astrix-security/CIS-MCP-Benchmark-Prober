@@ -916,8 +916,15 @@ class ScopeMinimization(Check):
             )
         if ctx.session is None:
             return "error", f"no live session to call {tool!r} with"
+        # Ask this one call to echo a progressToken we choose. It rides on a call
+        # that happens anyway, and a later check compares the token against what
+        # any progress notification carries. It changes nothing about this check.
+        progress_token = f"cis-probe-progress-{ctx.domain}"
+        ctx.progress_tokens_sent.add(progress_token)
         try:
-            result = await ctx.session.call_tool(tool, arguments)
+            result = await ctx.session.call_tool(
+                tool, arguments, meta={"progressToken": progress_token}
+            )
         except Exception as exc:  # noqa: BLE001 — a refusal arrives as an exception
             return _classify_refusal(tool, repr(exc))
         if getattr(result, "isError", False):

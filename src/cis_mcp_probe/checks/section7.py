@@ -231,6 +231,154 @@ class NullRequestIdRejected(Check):
         return self._pass(evidence, **details)
 
 
+NO_CHANNEL = (
+    "no notification stream was opened, so nothing could arrive. That is a limit of "
+    "this run rather than an observation about the server"
+)
+
+
+def _notification_meta(notification: object) -> dict:
+    """The ``_meta`` a notification carried, as a plain dict.
+
+    ``params`` is None on some notification types, so reaching straight for
+    ``params.meta`` raises on them. An absent ``_meta`` and an empty one both come
+    back as {}: neither names anything.
+    """
+    params = getattr(notification, "params", None)
+    meta = getattr(params, "meta", None) if params is not None else None
+    if meta is None:
+        return {}
+    return meta.model_dump(by_alias=True)
+
+
+def _server_identity_outcome(notifications: list, channel: bool) -> tuple[str, str]:
+    """Decide leg 7.2.2f: every notification names the server that sent it.
+
+    The benchmark makes this a failure condition in its own words, so an absence
+    is graded even though the protocol only recommends the field.
+    """
+    if not notifications:
+        return ("unknown", NO_CHANNEL if not channel else "no notification arrived")
+    missing = [
+        getattr(n, "method", "?")
+        for n in notifications
+        if not _notification_meta(n).get(SERVER_INFO_KEY)
+    ]
+    if missing:
+        return (
+            "fail",
+            f"{len(missing)} of {len(notifications)} notifications carry no server "
+            f"identity ({', '.join(sorted(set(missing)))})",
+        )
+    return (
+        "pass",
+        f"all {len(notifications)} notifications name the server that sent them",
+    )
+
+
+def _progress_token_outcome(
+    notifications: list, sent: set[str], channel: bool
+) -> tuple[str, str]:
+    """Decide leg 7.2.2a: a progress notification echoes a token this run sent.
+
+    A token belonging to another check's call is correct, not a mismatch, which is
+    why the comparison is against the whole set rather than one value.
+    """
+    if not channel:
+        return ("unknown", NO_CHANNEL)
+    if not sent:
+        return (
+            "unknown",
+            "no progressToken was sent, so no notification could echo one",
+        )
+    progress = [
+        n for n in notifications if getattr(n, "method", "") == "notifications/progress"
+    ]
+    if not progress:
+        return (
+            "unknown",
+            f"{len(notifications)} notifications arrived and none was a progress "
+            "notification, so no token was echoed back",
+        )
+    stray = [
+        str(getattr(n.params, "progressToken", None))
+        for n in progress
+        if str(getattr(n.params, "progressToken", None)) not in sent
+    ]
+    if stray:
+        return (
+            "fail",
+            f"{len(stray)} of {len(progress)} progress notifications carry a token "
+            f"this run never sent ({', '.join(sorted(set(stray)))})",
+        )
+    return (
+        "pass",
+        f"all {len(progress)} progress notifications echo a token this run sent",
+    )
+
+
+@register
+class SignalCorrelation(Check):
+    """7.2.2, Assessment Status: Automated.
+
+    Two properties the operator's monitoring rests on: that a notification names
+    its server, and that a progress notification echoes the token its originating
+    request set. Neither is the monitoring itself.
+    """
+
+    id = "7.2.2"
+    title = (
+        "notifications/cancelled and notifications/progress are monitored for "
+        "behavioral anomalies"
+    )
+    section = "7"
+    level = Level.L2
+    remediation = (
+        "Include the server identity in every notification, and echo the "
+        "progressToken from the originating request on every progress "
+        "notification. Then baseline cancellation and progress rates per server "
+        "and alert on a signal that references no originating request."
+    )
+
+    async def run(self, ctx: ProbeContext) -> CheckResult:
+        legs = [
+            (
+                "7.2.2f",
+                *_server_identity_outcome(ctx.notifications, ctx.notification_channel),
+            ),
+            (
+                "7.2.2a",
+                *_progress_token_outcome(
+                    ctx.notifications,
+                    ctx.progress_tokens_sent,
+                    ctx.notification_channel,
+                ),
+            ),
+        ]
+        evidence = (
+            "; ".join(f"{leg}: {note}" for leg, _outcome, note in legs)
+            + ". Not covered: 7.2.2b, that a cancellation requestId maps to a "
+            "request that was issued, which is the stdio path; 7.2.2c, "
+            "response-stream close and abort events, observable only at the server "
+            "or its gateway; 7.2.2d, task lifecycle keyed by taskId; and 7.2.2e, "
+            "the per-server baselines and the rate-anomaly rules built on them"
+        )
+        details = {
+            "legs": {leg: outcome for leg, outcome, _note in legs},
+            "notification_channel": ctx.notification_channel,
+            "notifications_seen": len(ctx.notifications),
+            "progress_tokens_sent": sorted(ctx.progress_tokens_sent),
+        }
+        outcomes = {outcome for _leg, outcome, _note in legs}
+        if "fail" in outcomes:
+            return self._fail(evidence, **details)
+        if "error" in outcomes:
+            return self._error(evidence, **details)
+        if "unknown" in outcomes:
+            return self._unknown(evidence, **details)
+        return self._pass(evidence, **details)
+
+
 @register
 class AuditTimestamps(Check):
     """7.1.3, Assessment Status: Automated.
