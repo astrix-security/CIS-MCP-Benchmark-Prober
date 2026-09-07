@@ -406,3 +406,113 @@ class AuditTimestamps(Check):
             "nothing to compare",
             transport=ctx.transport,
         )
+
+
+def _wrong_audience_outcome(
+    token: str | None, control_status: int | None, probe_status: int | None
+) -> tuple[str, str]:
+    """Decide leg 7.2.1a from a control request and a mis-scoped one.
+
+    The control is not optional. A 401 on the mis-scoped token means nothing if the
+    endpoint refuses the valid token too, so the leg only reads a refusal as
+    audience validation once the same endpoint has answered the valid token.
+    """
+    if not token:
+        return (
+            "unknown",
+            "no token bound to another resource was obtained, so the server's own "
+            "audience validation was never exercised. An authorization server that "
+            "refuses to mint one is itself conforming",
+        )
+    if control_status is None or not 200 <= control_status < 300:
+        return (
+            "unknown",
+            f"the control request with the valid token did not succeed "
+            f"(HTTP {control_status}), so a refusal of the mis-scoped token cannot "
+            "be attributed to its audience",
+        )
+    if probe_status in (401, 403):
+        return (
+            "pass",
+            f"the server refused a token minted for another resource with HTTP "
+            f"{probe_status}, while the valid token was accepted",
+        )
+    if probe_status is not None and 200 <= probe_status < 300:
+        return (
+            "fail",
+            "the server accepted a token minted for another resource "
+            f"(HTTP {probe_status}), so it does not validate that a token was "
+            "issued for itself",
+        )
+    return (
+        "unknown",
+        f"the mis-scoped token drew HTTP {probe_status}, which is neither an "
+        "acceptance nor an authentication refusal, so it decides nothing",
+    )
+
+
+@register
+class WrongAudienceRejected(Check):
+    """7.2.1, Assessment Status: Automated.
+
+    Defined last in this file on purpose. It presents a token minted for another
+    resource, and obtaining that token spends a refresh grant, so no check
+    registered after it may rely on the cached credential.
+    """
+
+    id = "7.2.1"
+    title = "Alerts are generated on audience and issuer validation failures"
+    section = "7"
+    level = Level.L1
+    remediation = (
+        "Validate that an inbound token names this server as its audience and "
+        "return 401 when it does not. Emit each failure as a structured event "
+        "carrying an error code, and alert on those events."
+    )
+
+    async def run(self, ctx: ProbeContext) -> CheckResult:
+        if not ctx.endpoint_url:
+            return self._error("no endpoint was reached, so no request could be sent")
+
+        token = ctx.foreign_audience_token
+        control_status: int | None = None
+        probe_status: int | None = None
+
+        if token:
+            payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+            try:
+                control_status, _b, _t = await raw_jsonrpc(
+                    ctx.endpoint_url,
+                    payload,
+                    token=ctx.access_token,
+                    protocol_header=ctx.negotiated_version,
+                )
+                probe_status, _b, _t = await raw_jsonrpc(
+                    ctx.endpoint_url,
+                    payload,
+                    token=token,
+                    protocol_header=ctx.negotiated_version,
+                )
+            except Exception as e:  # noqa: BLE001
+                return self._error(f"the audience probe could not be sent: {e!r}")
+
+        outcome, note = _wrong_audience_outcome(token, control_status, probe_status)
+        evidence = (
+            f"7.2.1a: {note}. Not covered: 7.2.1b, that the failure is emitted as a "
+            "structured event carrying an error code; 7.2.1c, that a rule alerts on "
+            "those events and routes them to an operator; and 7.2.1d, client-side "
+            "issuer validation, which binds the client rather than the server"
+        )
+        details = {
+            "legs": {"7.2.1a": outcome},
+            "control_status": control_status,
+            "wrong_audience_status": probe_status,
+            "had_foreign_audience_token": bool(token),
+        }
+        if outcome == "fail":
+            return self._fail(evidence, **details)
+        if outcome == "error":
+            return self._error(evidence, **details)
+        if outcome == "unknown":
+            return self._unknown(evidence, **details)
+        return self._pass(evidence, **details)
