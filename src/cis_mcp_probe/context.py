@@ -61,6 +61,24 @@ class ProbeContext:
     # listChanged and other server notifications collected during the session.
     notifications: list[Any] = field(default_factory=list)
 
+    # Whether a server-to-client notification stream was established at all. Without
+    # it, an empty `notifications` means we never listened rather than that the
+    # server sent nothing, and those are different findings.
+    notification_channel: bool = False
+
+    # The `_meta` envelope each result carried, keyed by the method that produced it.
+    result_meta: dict[str, dict] = field(default_factory=dict)
+
+    # Every progressToken this run asked a tool call to echo. A set, because more
+    # than one check may call a tool, and a notification carrying another call's
+    # token is correct rather than a mismatch.
+    progress_tokens_sent: set[str] = field(default_factory=set)
+
+    # A token the authorization server minted for a different resource, kept so a
+    # later check can present it without asking for a second one. A refresh grant
+    # can rotate the cached refresh token, so one request per run is the limit.
+    foreign_audience_token: str | None = None
+
     # When True, checks that maintain state (e.g. capability baseline) capture/
     # refresh it instead of comparing against it.
     update_baseline: bool = False
@@ -161,9 +179,7 @@ class ProbeContext:
             "server_info": (
                 {"name": info.name, "version": info.version} if info else None
             ),
-            "capabilities": (
-                caps.model_dump(exclude_none=True) if caps else None
-            ),
+            "capabilities": (caps.model_dump(exclude_none=True) if caps else None),
             "counts": {
                 "tools": len(self.tools),
                 "resources": len(self.resources),
