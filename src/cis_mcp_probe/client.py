@@ -422,6 +422,10 @@ async def _observe_notification_channel(ctx: ProbeContext, endpoint: str) -> Non
 
     The body is never read. An open stream does not end, so consuming it would block
     for the stream's lifetime and lose the status that is the whole observation.
+
+    Call this only once a token is held. An OAuth server answers an unauthenticated
+    GET with 401, which says nothing about whether it offers a stream, and recording
+    that as "no stream" would blame the server for a credential we never sent.
     """
     headers = {"Accept": "text/event-stream"}
     if ctx.negotiated_version:
@@ -627,7 +631,6 @@ async def connect_and_probe(
             print(notice, file=sys.stderr)
         if endpoint is not None:
             ctx.transport = "streamable-http"
-            await _observe_notification_channel(ctx, endpoint)
             await _fetch_oauth_metadata(ctx, http, endpoint)
 
     if endpoint is None:
@@ -758,6 +761,7 @@ async def _session_attempt(
                     ctx.access_token = tokens.access_token
                     ctx.token_expires_in = tokens.expires_in
                     ctx.token_scope = tokens.scope
+                await _observe_notification_channel(ctx, endpoint)
                 await _enumerate(ctx, session)
                 await _detect_rc_support(ctx)
                 return await _run_checks(ctx, checks)
