@@ -1249,6 +1249,129 @@ another login. Two conditions end that: an authorization server that expires the
 refresh token as well, and `--reauth`, which discards both on purpose. A run that
 cannot refresh says so, opens a browser, and waits for the login.
 
+## Section 7 — observability and audit
+
+Every recommendation in this section has an audit-log half that a remote client
+cannot reach. Two checks report `N/A` for that reason. The other three decide from
+the wire, where the recommendation's own compliance statement turns on something
+observable.
+
+### 7.1.1 Lifecycle and invocation metadata is recorded
+
+**Level:** L1 · **Benchmark assessment status:** Automated
+
+**What the check requires.** Every audit entry must carry a timestamp, a
+correlation identifier, an event type and the producing server's identity, and the
+logs must ship to a central store with integrity controls.
+
+**How the probe implements it.** It does not, and reports `N/A`. Two things a client
+can see are recorded as evidence: whether each result names its server in `_meta`,
+and whether the server still advertises the deprecated `logging` capability.
+
+**Why.** The audit samples the deployment's own log. The server-identity field has a
+wire source, but it is only one possible source — a logger can take the identity from
+its own configuration — so its absence on the wire is not a failure of this
+recommendation. The negotiated revision is recorded alongside, because reporting
+identity per result is a 2026-07-28 recommendation the protocol marks optional.
+
+### 7.1.2 Non-null JSON-RPC request IDs are enforced
+
+**Level:** L1 · **Benchmark assessment status:** Automated
+
+**What the check requires.** A request whose `id` is null must be rejected as an
+Invalid Request, with JSON-RPC `-32600` and HTTP `400`. The request `id` must also
+appear on every audit entry.
+
+**How the probe implements it.** One otherwise-conformant `tools/list` carrying a
+null `id`, sent over the authenticated session so it reaches id validation rather
+than stopping at a 401.
+
+- A success result, or a 2xx with no body, is an acceptance and fails. A 2xx with no
+  body is how an accepted notification is acknowledged, so a server answering that
+  way took the message for something it is not instead of refusing it. The evidence
+  says which acceptance occurred.
+- A rejection passes even when the status or the code differs from `400` and
+  `-32600`, with both observed values named. A refusal is positive evidence.
+- A non-2xx carrying no JSON-RPC error object reports `ERROR`. A gateway in front of
+  the server produces exactly that, so it says nothing about the server.
+- A `401` or `403` reports `UNKNOWN`: the request never reached id validation.
+
+**Reduction.** Whether the request `id` reaches the audit log is not observable.
+Neither is the outstanding-id collision rule: discrete HTTP requests cannot hold one
+request in flight while a second reuses its id.
+
+### 7.1.3 Audit records carry accurate, monotonic timestamps
+
+**Level:** L1 · **Benchmark assessment status:** Automated
+
+**What the check requires.** Every record carries a parseable timestamp, timestamps
+do not move backward within a request stream, and the newest is close to real time.
+
+**How the probe implements it.** It does not, and reports `N/A`.
+
+**Why.** The requirement is stated against the values recorded in the log rather than
+against any host time service, and the timestamp field is read by name from the
+schema the deployment pins. MCP carries no timestamp on the wire, so there is nothing
+to compare.
+
+### 7.2.1 Alerts are generated on audience and issuer validation failures
+
+**Level:** L1 · **Benchmark assessment status:** Automated
+
+**What the check requires.** A token whose audience is not this server draws a `401`,
+the failure is emitted as a structured event carrying an error code, and a rule alerts
+on it.
+
+**How the probe implements it.** It presents a token the authorization server minted
+for a different resource, and requires a control request with the valid token to
+succeed first. Without that control a `401` may only mean the endpoint refuses
+everything, which is the trap the recommendation itself warns about.
+
+**Reduction.** The structured event, the alerting rule and the routing to an operator
+are all operator-side, and they are the recommendation's actual subject. Client-side
+issuer validation binds the client, which is this probe, so it is out of scope. Where
+the authorization server refuses to mint a token for another resource — the conforming
+answer — the check reports `UNKNOWN`.
+
+### 7.2.2 Cancellation and progress signals are monitored
+
+**Level:** L2 · **Benchmark assessment status:** Automated
+
+**What the check requires.** Every notification carries the server's identity, every
+cancellation `requestId` and progress `progressToken` maps to a request that was
+issued, and per-server baselines drive anomaly alerts.
+
+**How the probe implements it.** Two legs, aggregated worst-verdict-first.
+
+- Every notification received must carry a non-empty
+  `io.modelcontextprotocol/serverInfo`. The benchmark names a notification lacking
+  server identity as a failure in its own words, so an absence is graded here even
+  though the protocol only recommends the field.
+- Every progress notification must echo a `progressToken` this run sent. The token
+  rides on a tool call another check already makes, so no invocation is added. The
+  comparison is against every token sent, because a notification for another call is
+  correct rather than a mismatch.
+
+**Reduction.** The baselines and the anomaly rules are operator-side. Cancellation by
+notification is the stdio path, and on Streamable HTTP a cancellation is a closed
+response stream, observable only at the server or its gateway. Task lifecycle keyed
+by `taskId` is not probed.
+
+**Three absences that read differently.** No notification stream opened at all is a
+limit of the run, not an observation, and the evidence says so rather than reporting
+that nothing arrived. Nothing arriving on an open stream is the second case. A stream
+carrying notifications where none is a progress notification is the third.
+
+### Section 7 coverage gaps
+
+1. **The audit-log half of every check is unreachable.** That is the whole of 7.1.1
+   and 7.1.3, and one half each of 7.1.2, 7.2.1 and 7.2.2.
+2. **7.2.2 has no live coverage yet.** A notification stream opens, but no target has
+   sent a notification during a run, and the progress leg needs an operator input
+   naming a tool for the scope probe to call.
+3. **7.2.1 has no live coverage yet.** It needs an authorization server willing to
+   mint a token for another resource, and refusing is the conforming answer.
+
 ### Servers not covered
 
 - **Sentry** (`mcp.sentry.dev`) was unreachable during Section 3 testing, so it
