@@ -34,18 +34,17 @@ from jsonschema.validators import (
     Draft201909Validator,
     Draft202012Validator,
 )
-
 from mcp.shared.exceptions import McpError
 
 from .. import inputs
 from ..client import RC_VERSION
+from ..context import ProbeContext
 from ..rawreq import (
     jsonrpc_error_code,
     raw_endpoint_request,
     raw_jsonrpc,
     raw_jsonrpc_headers,
 )
-from ..context import ProbeContext
 from .base import Check, CheckResult, Level, register
 
 # The dialects we implement, keyed by the token found in a declared $schema.
@@ -989,13 +988,15 @@ class LegacySessionSurfaceDisabled(Check):
         outcome, note = _status_outcome(del_status)
         results.append(("5.2.3b", outcome, f"DELETE: {note}"))
 
-        _s, control, _t = await raw_jsonrpc(
+        # Both statuses are kept: the fail and error evidence below name them, so
+        # discarding them leaves those two branches unable to report what they saw.
+        c_status, control, _t = await raw_jsonrpc(
             endpoint,
             _tools_list_body(1),
             token=ctx.access_token,
             protocol_header=RC_VERSION,
         )
-        _s, resumed, _t = await raw_jsonrpc(
+        r_status, resumed, _t = await raw_jsonrpc(
             endpoint,
             _tools_list_body(2),
             token=ctx.access_token,
@@ -1047,7 +1048,7 @@ class LegacySessionSurfaceDisabled(Check):
                 )
             )
 
-        _s, c_data, _t, c_head = await raw_jsonrpc_headers(
+        _s, _c_data, _t, c_head = await raw_jsonrpc_headers(
             endpoint,
             _tools_list_body(3),
             token=ctx.access_token,
