@@ -1369,8 +1369,48 @@ carrying notifications where none is a progress notification is the third.
 2. **7.2.2 has no live coverage yet.** A notification stream opens, but no target has
    sent a notification during a run, and the progress leg needs an operator input
    naming a tool for the scope probe to call.
-3. **7.2.1 has no live coverage yet.** It needs an authorization server willing to
-   mint a token for another resource, and refusing is the conforming answer.
+3. **7.2.1 has one live verdict, on Stripe.** Elsewhere it needs an authorization
+   server willing to mint a token for another resource, and refusing is the conforming
+   answer.
+4. **A token snapshotted on the context can go stale mid-run.** The SDK's OAuth
+   provider may refresh it, and a later raw request then draws `401` and reports
+   undecided. Reading the credential at use time rather than at session start would
+   close this.
+
+### Section 7 results
+
+Probed 2026-09-07 and 2026-09-08.
+
+| Check | DeepWiki | Linear | Stripe | Notion | Sentry |
+|---|---|---|---|---|---|
+| 7.1.1 | `N/A` | `N/A` | `N/A` | `N/A` | — |
+| 7.1.2 | **`FAIL`** | `PASS` | `ERROR` | `UNKNOWN` | — |
+| 7.1.3 | `N/A` | `N/A` | `N/A` | `N/A` | — |
+| 7.2.1 | `UNKNOWN` | `UNKNOWN` | **`PASS`** | `UNKNOWN` | — |
+| 7.2.2 | `UNKNOWN` | `UNKNOWN` | `UNKNOWN` | `UNKNOWN` | — |
+
+**7.1.2 separates three servers on one rule.** DeepWiki answers a null request id with
+`202` and an empty body, accepting it as though it were a notification, which fails.
+Linear refuses it with `400` and `-32600`, the exact shape the benchmark names. Stripe
+answers `400` with `content-length: 0`, so the refusal carries no JSON-RPC error object
+and cannot be attributed to the server rather than to something in front of it, which
+is `ERROR` and not a pass.
+
+**7.2.1 has one real verdict.** Stripe is the only target whose authorization server
+minted a token for another resource, and it then refused that token with `401` while
+accepting the valid one. Everywhere else the authorization server declined to mint one,
+which is itself the conforming answer, so the leg is undecided.
+
+**7.2.2 has no live coverage.** Only DeepWiki opens a server-to-client notification
+stream at all; Linear answers `GET` with `405` and `Allow: POST, DELETE, OPTIONS`. No
+target sent a notification during a run, so neither leg had anything to read.
+
+**One limitation worth naming.** The access token is snapshotted onto the context when
+the session starts, and the SDK's OAuth provider may refresh it mid-run. A later raw
+request then presents a credential the server has retired and draws `401`, which the
+check reports as undecided rather than as a finding. That is what happened to 7.1.2 on
+Notion: the same request with a freshly read token returns `400` and `-32600`, the
+clean refusal.
 
 ### Servers not covered
 
