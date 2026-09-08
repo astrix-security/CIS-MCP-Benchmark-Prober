@@ -7,5 +7,6 @@ registering itself. As new sections are added, import them here.
 from .base import Check, CheckResult, Level, Status, all_checks, register
 from . import section1  # noqa: F401  (imported for check registration side effect)
 from . import section2  # noqa: F401  (imported for check registration side effect)
+from . import section3  # noqa: F401  (imported for check registration side effect)
 
 __all__ = ["Check", "CheckResult", "Level", "Status", "all_checks", "register"]

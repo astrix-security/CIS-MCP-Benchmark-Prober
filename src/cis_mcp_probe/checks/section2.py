@@ -125,6 +125,24 @@ class TlsRequiredNoPlaintext(Check):
                 f"behaviour is not attributable to a served deployment"
             )
 
+        # Nothing here describes the server when something else terminated the TLS
+        # connection. The certificate and the negotiated version are the
+        # interceptor's, and the plaintext leg is unattributable too, because a
+        # proxy that upgrades the scheme hides what the server would have done.
+        if tls.tls_intercepted:
+            issuer = (tls.tls_cert or {}).get("issuer") or {}
+            named = issuer.get("commonName") or issuer.get("organizationName")
+            return self._unknown(
+                "this connection was terminated by a TLS-inspecting proxy, so the "
+                "certificate and the negotiated version belong to it rather than to "
+                f"the server (issuer: {named!r}). The chain verified against this "
+                "machine's trust store but not against the public CA set. Re-run "
+                "from a network without interception to decide this check",
+                tls_intercepted=True,
+                observed_issuer=issuer,
+                negotiated=tls.tls_version,
+            )
+
         failures: list[str] = []
         notes: list[str] = []
         details: dict[str, object] = {}

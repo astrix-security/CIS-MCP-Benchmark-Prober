@@ -47,6 +47,18 @@ class ProbeRun:
     results: list[CheckResult]
 
 
+def _sort_key(check_id: str) -> tuple[int, tuple[int, ...] | str]:
+    """Order a check id by its dot-separated numeric components, e.g. "3.9"
+    before "3.10". Falls back to the raw string for an id that isn't purely
+    numeric, so a malformed id sorts after the numeric ones instead of
+    raising.
+    """
+    try:
+        return (0, tuple(int(part) for part in check_id.split(".")))
+    except ValueError:
+        return (1, check_id)
+
+
 def _aggregate(runs: list[ProbeRun]) -> list[dict[str, Any]]:
     """Pivot per-server results into a per-check view."""
     checks: dict[str, dict[str, Any]] = {}
@@ -65,7 +77,7 @@ def _aggregate(runs: list[ProbeRun]) -> list[dict[str, Any]]:
                 checks[r.check_id] = entry
                 order.append(r.check_id)
             entry["servers"][run.ctx.domain] = r
-    return [checks[cid] for cid in sorted(order)]
+    return [checks[cid] for cid in sorted(order, key=_sort_key)]
 
 
 def _counts(servers: dict[str, CheckResult]) -> dict[Status, list[str]]:
