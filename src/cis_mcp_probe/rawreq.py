@@ -178,7 +178,7 @@ async def _guarded_fetch(
             resp = await client.request(
                 method, url, headers=headers, data=data, json=json_body
             )
-    except Exception as exc:  # a caller gets an error string, never a raise
+    except Exception as exc:  # noqa: BLE001 — callers get a string, never a raise
         return None, {}, "", repr(exc)
 
     return (
@@ -264,15 +264,14 @@ async def raw_endpoint_request(
     try:
         async with httpx.AsyncClient(
             follow_redirects=False, timeout=timeout, verify=verify_context()
-        ) as client:
-            async with client.stream(method, endpoint, headers=headers) as resp:
-                return (
-                    resp.status_code,
-                    {k.lower(): v for k, v in resp.headers.items()},
-                    "",
-                    None,
-                )
-    except Exception as exc:  # a caller gets an error string, never a raise
+        ) as client, client.stream(method, endpoint, headers=headers) as resp:
+            return (
+                resp.status_code,
+                {k.lower(): v for k, v in resp.headers.items()},
+                "",
+                None,
+            )
+    except Exception as exc:  # noqa: BLE001 — callers get a string, never a raise
         return None, {}, "", repr(exc)
 
 
