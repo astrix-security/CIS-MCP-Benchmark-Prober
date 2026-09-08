@@ -1383,18 +1383,23 @@ Probed 2026-09-07 and 2026-09-08.
 
 | Check | DeepWiki | Linear | Stripe | Notion | Sentry |
 |---|---|---|---|---|---|
-| 7.1.1 | `N/A` | `N/A` | `N/A` | `N/A` | — |
-| 7.1.2 | **`FAIL`** | `PASS` | `ERROR` | `UNKNOWN` | — |
-| 7.1.3 | `N/A` | `N/A` | `N/A` | `N/A` | — |
-| 7.2.1 | `UNKNOWN` | `UNKNOWN` | **`PASS`** | `UNKNOWN` | — |
-| 7.2.2 | `UNKNOWN` | `UNKNOWN` | `UNKNOWN` | `UNKNOWN` | — |
+| 7.1.1 | `N/A` | `N/A` | `N/A` | `N/A` | `N/A` |
+| 7.1.2 | **`FAIL`** | `PASS` | `ERROR` | `UNKNOWN` | `PASS` |
+| 7.1.3 | `N/A` | `N/A` | `N/A` | `N/A` | `N/A` |
+| 7.2.1 | `UNKNOWN` | `UNKNOWN` | **`PASS`** | `UNKNOWN` | `UNKNOWN` |
+| 7.2.2 | `UNKNOWN` | `UNKNOWN` | `UNKNOWN` | `UNKNOWN` | `UNKNOWN` |
 
-**7.1.2 separates three servers on one rule.** DeepWiki answers a null request id with
-`202` and an empty body, accepting it as though it were a notification, which fails.
-Linear refuses it with `400` and `-32600`, the exact shape the benchmark names. Stripe
-answers `400` with `content-length: 0`, so the refusal carries no JSON-RPC error object
-and cannot be attributed to the server rather than to something in front of it, which
-is `ERROR` and not a pass.
+All five targets were reached and authenticated, except DeepWiki, which requires no
+authentication.
+
+**7.1.2 separates the five targets three ways.** DeepWiki answers a null request id
+with `202` and an empty body, accepting it as though it were a notification, which
+fails. Linear and Sentry refuse it with `400` and `-32600`, the exact shape the
+benchmark names. Stripe answers `400` with `content-length: 0`, so the refusal carries
+no JSON-RPC error object and cannot be attributed to the server rather than to
+something in front of it, which is `ERROR` and not a pass. Notion also refuses with
+`400` and `-32600` when the request carries a current credential, but the run recorded
+`UNKNOWN` for the reason named below.
 
 **7.2.1 has one real verdict.** Stripe is the only target whose authorization server
 minted a token for another resource, and it then refused that token with `401` while
@@ -1402,8 +1407,10 @@ accepting the valid one. Everywhere else the authorization server declined to mi
 which is itself the conforming answer, so the leg is undecided.
 
 **7.2.2 has no live coverage.** Only DeepWiki opens a server-to-client notification
-stream at all; Linear answers `GET` with `405` and `Allow: POST, DELETE, OPTIONS`. No
-target sent a notification during a run, so neither leg had anything to read.
+stream at all; Linear answers `GET` with `405` and `Allow: POST, DELETE, OPTIONS`, and
+the other three open none either. No target sent a notification during a run, so
+neither leg had anything to read. The progress leg additionally needs an operator input
+naming a tool for the scope probe to call, and no target has one.
 
 **One limitation worth naming.** The access token is snapshotted onto the context when
 the session starts, and the SDK's OAuth provider may refresh it mid-run. A later raw
