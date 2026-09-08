@@ -2114,6 +2114,7 @@ def _rotated_refresh(body: str, spent: str) -> str | None:
 
 
 async def _restore_refresh_chain(
+    ctx: ProbeContext,
     store: FileTokenStorage,
     token_endpoint: str,
     form: dict[str, str],
@@ -2126,6 +2127,11 @@ async def _restore_refresh_chain(
     bound to a resource the audited server does not serve, so neither caching that
     pair nor caching nothing is right. Returns the sentence the leg appends to its
     evidence; a failure here is not a verdict.
+
+    The renewed access token also replaces the one on the context. An issuer that
+    rotates on refresh may invalidate the token this run started with, and every
+    later check still reads ``ctx.access_token``: leaving the old value there sends
+    them all at a credential the server has already retired.
     """
     status, _, text, error = await raw_post_form(
         token_endpoint, dict(form, refresh_token=refresh, resource=resource)
@@ -2144,6 +2150,8 @@ async def _restore_refresh_chain(
             "run needs a fresh login"
         )
     await store.set_tokens(renewed)
+    if renewed.access_token:
+        ctx.access_token = renewed.access_token
     return (
         f"the refresh chain was restored for {resource}, so the cached credential "
         "survives this leg"
@@ -2423,6 +2431,7 @@ class AudienceBinding(Check):
         rotated = _rotated_refresh(text, refresh)
         if rotated:
             restored = await _restore_refresh_chain(
+                ctx,
                 store,
                 token_endpoint,
                 form,
