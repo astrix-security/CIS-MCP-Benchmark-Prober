@@ -28,78 +28,167 @@ adopts the revision.
 
 ## Section 1 — protocol and capability integrity
 
-### 1.1 Unapproved or absent protocol version is rejected
+### 1.1 Served protocol revisions are pinned and malformed assertions are rejected
 
-**Level:** L1
+**Level:** L1 · **Benchmark assessment status:** Automated
 
-**What the check requires.** The server must reject a request whose asserted
-protocol version is absent or outside the approved allowlist, instead of falling
-back to a default revision.
+**What the check requires.** An endpoint must serve only approved protocol
+revisions, and must reject a request whose asserted version is unapproved, absent,
+or stated inconsistently, rather than processing it under a default revision.
 
-**How the probe implements it.** Two requests per server: one asserting a bogus
-version (`2024-01-01`), one asserting none. Both must be rejected.
+**How the probe implements it.** Five legs, each reported separately in the
+evidence and in `details["legs"]`.
 
-The mechanism for asserting the version differs by revision, so the probe
-detects which the server speaks and adapts:
+| Leg | Probe | Conforming outcome |
+|---|---|---|
+| 1.1a | the revisions the endpoint serves, against a `2025-06-18` floor | every served revision at or after the floor |
+| 1.1b | `tools/list` asserting `2024-01-01` | `-32022` at HTTP 400 |
+| 1.1c | `tools/list` with no `MCP-Protocol-Version` header | `-32020` at HTTP 400 |
+| 1.1d | `tools/list` with a correct header and no version in `_meta` | `-32602` at HTTP 400 |
+| 1.1e | `tools/list` whose header and `_meta` versions disagree | `-32020` at HTTP 400 |
 
-- 2026-07-28 — per-request `_meta` field `io.modelcontextprotocol/protocolVersion`
-- 2025-11-25 and earlier — the `MCP-Protocol-Version` HTTP header
+Leg 1.1a answers one question two ways: is any revision earlier than the floor
+served. Where the server negotiates 2026-07-28 it reads the full `supportedVersions`
+array from `server/discover`. Otherwise it offers each sub-floor revision on its own
+`initialize` and treats an echo of the requested revision as positive evidence that
+the endpoint serves it, which the specification requires a server to send only for a
+revision it supports. Both routes measure what the endpoint *serves*, which is what
+this recommendation asks for rather than what it accepts per request.
 
-**Reduction.** The benchmark also requires the version to be logged. Log
-inspection is operator-side, so only the rejection half is implemented.
+A revision whose probe could not be sent is reported rather than dropped: a clean
+result over an incomplete set would otherwise read as compliant when the revision
+that never answered was the offending one.
 
-### 1.2 Advertised capabilities match the recorded baseline
+The mechanism for asserting a version differs by revision, so the probe adapts:
 
-**Level:** L1
+- 2026-07-28 — the `MCP-Protocol-Version` header and the `_meta` field
+  `io.modelcontextprotocol/protocolVersion`, which must agree
+- 2025-11-25 and earlier — the header alone
 
-**What the check requires.** Advertised capabilities must not grow without
-review. New capabilities are unauthorized drift.
+**Reductions.** Three, and the first can be generous rather than strict.
 
-**How the probe implements it.** Capabilities and the tool, resource and prompt
-inventory are captured from the `initialize` result and the `*/list` methods,
-then compared against a baseline stored per endpoint URL under
-`~/.cis-mcp-probe/`. Capture or refresh it with `--update-baseline`.
+1. The approved allowlist is an operator artifact the probe cannot read, so leg
+   1.1a compares against the `2025-06-18` floor this recommendation sets. A server
+   serving only revisions at or after the floor passes, even where an operator's
+   own allowlist is narrower. The evidence says the allowlist was not read.
+2. Legs 1.1d and 1.1e test the header-versus-`_meta` agreement that only
+   2026-07-28 defines, so they report `NO-REV` below it. A leg reporting `NO-REV`
+   is excluded from the check's verdict rather than lowering it, and the evidence
+   records which legs were not reached.
+3. The recommendation also requires the asserted version to be logged on every
+   request. That is read from a deployment audit log, so it is not probed.
 
-**Reduction.** The benchmark expects an operator-maintained approved-capability
-baseline. The probe has no access to one, so it records its own and reports drift
-relative to that. Until a baseline exists for a server, the verdict is `UNKNOWN`.
-A run with `--update-baseline` is also `UNKNOWN`: capturing a baseline compares
-nothing, so that run cannot decide.
+A rejection carrying an unexpected error code passes with the code named, since the
+request was still refused. A bare rejection with no protocol error body is `ERROR`,
+not `FAIL`: it may have come from a gateway that never reached the origin.
 
-### 1.3 Capabilities added via listChanged are not silently invocable
+### 1.2 Advertised capability configuration matches the recorded baseline
 
-**Level:** L2
+**Level:** L1 · **Benchmark assessment status:** Manual
 
-**What the check requires.** A capability newly advertised through a
-`listChanged` notification must be held pending re-approval, not immediately
-invocable.
+**What the check requires.** The capability configuration an endpoint advertises
+must not exceed or differ from an approved baseline. Every nested setting counts,
+not only the names, because a configuration can change materially without any name
+being added.
 
-**How the probe implements it.** Waits briefly for a `listChanged` notification,
-re-lists tools to identify what was added, then attempts to invoke the new tool.
-Reaching the tool means it was invocable without re-approval, which is a failure.
-A JSON-RPC `-32602` invalid-params error counts as reaching the tool, because the
-server had to resolve the tool name and validate arguments to produce it.
+**How the probe implements it.** The capability object is flattened to one entry
+per leaf with its value, then compared against a baseline stored per endpoint URL
+under `~/.cis-mcp-probe/baselines/`. Capture or refresh it with `--update-baseline`.
 
-**Reduction.** The MCP specification does not define which error code a
-conforming server returns when it denies a pending capability. The probe
-therefore treats any other error as a probable denial and says so in the
-evidence, so a reviewer can confirm it was an authorization denial rather than
-method-not-found. If no notification arrives inside the window, the verdict is
-`UNKNOWN`.
+| Observation | Verdict |
+|---|---|
+| a leaf advertised and not baselined, or one whose value changed | `FAIL` |
+| some baselined leaves withdrawn, others still advertised | `PASS`, withdrawal named |
+| every baselined leaf withdrawn and none advertised | `UNKNOWN` |
+| otherwise | `PASS` |
 
-### 1.4 Server exposes non-empty identity metadata
+Comparing values rather than names is what lets the check see `resources.subscribe`
+flip from `false` to `true`, or an extension limit rise. A name-level comparison
+reports no drift for either.
 
-**Level:** L1
+Total withdrawal is `UNKNOWN` rather than `PASS` because a run where everything
+vanished more likely read nothing than observed a reconfiguration.
 
-**What the check requires.** The server identity must be capturable and
-validatable against an asset inventory.
+**Reductions.** The probe has no access to a registry-approved baseline under
+change control, so it records its own and reports drift against that. Four distinct
+conditions give `UNKNOWN`, and the evidence names which applies: no baseline
+recorded yet, a baseline written before capability leaves were captured, a baseline
+whose capability object was read from a different source than this run's, and total
+withdrawal. The first three are cleared by `--update-baseline`.
 
-**How the probe implements it.** Confirms the `initialize` result carries a
-non-empty `serverInfo.name`, and records the version.
+Tool, resource and prompt name drift is reported as leg 1.2b and gates no verdict.
+This recommendation's audit compares the capability configuration object, and a tool
+name is not part of that object. Check 1.3 invokes such a tool and decides whether
+it was gated.
 
-**Reduction.** Reconciling that identity against an enterprise inventory is
-operator-side. Only the externally observable half — that the server asserts an
-identity at all — is implemented.
+### 1.3 A capability advertised beyond the baseline is denied until re-approved
+
+**Level:** L2 · **Benchmark assessment status:** Manual
+
+**What the check requires.** A capability advertised beyond the approved baseline
+must be held pending an explicit re-approval, and an attempt to invoke it must be
+denied.
+
+**How the probe implements it.** The staged capability is a tool advertised now and
+absent from the recorded baseline. A control probe on a tool present in both the
+baseline and the current inventory runs first, so a denial of the staged tool is
+attributable to a gate rather than to the probe. `PASS` requires the denial message
+to name a pending or unauthorized state, on either carrier a denial can arrive by: a
+JSON-RPC error from a gateway, or a result carrying `isError` from a gate inside the
+server's own tool handling.
+
+Reaching the staged tool is a failure. A `-32602` invalid-params error counts as
+reaching it, because the server had to resolve the name and validate arguments to
+produce it.
+
+**Arguments.** They cannot be derived from a schema safely, so they come from a
+`tool_arguments` entry in `~/.cis-mcp-probe/probe-inputs.json`, keyed by tool name.
+Without one, both calls carry no arguments, and a tool whose arguments are required
+then answers with a validation error indistinguishable from a gate denial. That is
+why the control probe failing is `ERROR` and why an unmatched rejection on the
+staged tool is `UNKNOWN` — neither is read as compliance.
+
+**Reductions.** The approved baseline is the one the probe recorded itself, as in
+1.2. The recommendation also requires every capability change to be logged with a
+diff and an approval state, which is read from a deployment audit log and is not
+probed.
+
+**When this check decides.** Only where a tool appears beyond the recorded
+baseline. Against a server whose inventory is unchanged between runs there is
+nothing staged to gate, and `UNKNOWN` is the correct answer rather than a limitation.
+
+### 1.4 Server identity matches the recorded identity
+
+**Level:** L1 · **Benchmark assessment status:** Automated
+
+**What the check requires.** Identity metadata that servers assert must be
+captured and cross-referenced against the approved identities in an enterprise
+registry. An observed identity absent from that registry is unauthorized asset
+expansion.
+
+**How the probe implements it.** The asserted `name` and `version` are read as one
+pair and compared against the pair recorded for the endpoint. A pair absent from
+the record is an unregistered identity and fails; a matching pair passes; no record
+yet, or no identity asserted, is `UNKNOWN`.
+
+The identity is read from the `initialize` result's `serverInfo`, where the schema
+requires it. From 2026-07-28 a server asserts identity per response in `_meta`
+instead. Reading it from there is not yet implemented: the probe holds one baseline
+record per endpoint and several checks write it, so a check that sourced the identity
+differently from the others would have its value overwritten by whichever wrote last,
+and the next run would read the difference as drift.
+
+A server that legitimately changes version fails this check until the new pair is
+recorded with `--update-baseline`. That matches the recommendation, under which a
+new `name|version` pair must be re-approved in the registry before it is compliant.
+
+**Reductions.** The registry export is one the probe recorded itself, so the check
+decides identity *drift* rather than conformance to an approved inventory, and a
+registered identity never observed is not reported. Client identity is not compared:
+this probe is the client, so comparing it would measure the probe. Whether the
+asserted identity is well formed is reported as leg 1.4a and gates no verdict — the
+recommendation's audit names no malformed-identity failure, and the schema makes the
+per-response identity optional from 2026-07-28.
 
 ## Section 2 — transport security
 
@@ -670,10 +759,10 @@ set, and has its own table and dates below.
 | # | Check | deepwiki | linear | sentry | stripe |
 |---|---|---|---|---|---|
 | — | **Negotiated revision** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-03-26** |
-| 1.1 | Unapproved or absent protocol version rejected | FAIL | FAIL | FAIL | FAIL |
-| 1.2 | Capabilities match recorded baseline | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
-| 1.3 | listChanged capabilities not silently invocable | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
-| 1.4 | Server exposes non-empty serverInfo | PASS | PASS | PASS | PASS |
+| 1.1 | Served revisions pinned, malformed assertions rejected | **FAIL** | **FAIL** | **FAIL** | not run |
+| 1.2 | Capability configuration matches recorded baseline | PASS | PASS | PASS | not run |
+| 1.3 | Capability beyond the baseline denied until re-approved | UNKNOWN | UNKNOWN | UNKNOWN | not run |
+| 1.4 | Server identity matches the recorded identity | PASS | PASS | PASS | not run |
 | 2.1 | stdio preferred for local, single-user servers | N/A | N/A | N/A | N/A |
 | 2.2 | TLS required, plaintext disallowed | PASS | PASS | **FAIL** | PASS |
 | 2.3 | Auth propagates through proxies on SSE responses | **FAIL** | PASS | PASS | UNKNOWN |
@@ -682,14 +771,41 @@ set, and has its own table and dates below.
 
 ### Reading the results
 
-- **1.1 — 0/4 pass.** Every server accepts a request with the protocol version
-  absent and defaults it. Three reject a bogus version. Stripe, on the older
-  2025-03-26 revision, accepts a bogus version too, so it does not validate the
-  version at all.
-- **1.2 and 1.3 — undecided.** 1.2 had no baseline recorded for these servers.
-  1.3 saw no `listChanged` notification inside the wait window, so there was
-  nothing to test.
-- **1.4 — 4/4 pass.** Every server asserts a name and version.
+- **1.1 — 0/3 decided pass.** Two legs fail on all three servers. Leg `1.1a`: each
+  serves `2024-11-05` and `2025-03-26`, both earlier than the `2025-06-18` floor,
+  so each offers a downgrade path to a revision predating the current security
+  model. Leg `1.1c`: each accepts a request carrying no `MCP-Protocol-Version`
+  header and answers it, rather than refusing to process it under a default
+  revision. Leg `1.1b` passes on all three, but none returns the specified
+  `-32022`: each rejects the unapproved version with `-32600` at HTTP 400, which
+  passes with the code named because the request was still refused. Legs `1.1d`
+  and `1.1e` are `NO-REV` throughout — no server negotiates 2026-07-28, so the
+  header-versus-`_meta` pair they test does not exist.
+- **1.2 — 3/3 pass, on the second run.** Each server's advertised capability
+  configuration matches the baseline recorded for it. A first run against a server
+  reports `UNKNOWN`, because a run that records a baseline compares nothing.
+- **1.3 — undecided on all three, and that is the servers' answer rather than the
+  probe's limit.** No tool is advertised beyond the recorded baseline on any of
+  them — 3 tools on DeepWiki, 65 on Linear, 9 on Sentry, all recorded — so no
+  staged capability exists to be gated. The leg decides when a tool does appear:
+  against a baseline with one DeepWiki tool removed, and arguments supplied, it
+  reports `FAIL`, because the staged tool executed and no gate stopped it.
+- **1.4 — 3/3 pass.** `DeepWiki|2.14.3`, `Linear MCP|1.0.0` and
+  `Sentry MCP|0.39.0` each match the pair recorded for the endpoint. Against a
+  baseline hand-edited to an older version the check reports `FAIL` and names both
+  pairs, so it discriminates rather than passing on any identity at all.
+- **Servers not covered, and runs that could not decide.** Stripe was not re-run for
+  this section: its OAuth flow needs a fresh browser authorization on every run,
+  because the loopback callback port changes and its cached client registration pins
+  the previous one, and the authorization timed out. Its four cells read `not run`
+  rather than carrying a stale verdict. Sentry is intermittent: one run in three
+  established no session at all and reported `ERROR` for every Section 1 check
+  together, which is a property of the run and not of the server. The verdicts above
+  are from runs that reached a session, and two consecutive such runs agreed.
+- **Leg 1.1a offers two `initialize` requests, not five.** Only two published
+  revisions precede the `2025-06-18` floor, so probing the rest cannot change the
+  answer. An earlier version probed all five and the resulting burst of nine requests
+  per run drew connection refusals from one server.
 - **2.2 — 3/4 pass.** Plaintext handling differs on every server: DeepWiki
   refuses the port, Linear answers 403, Stripe redirects with 301, Sentry serves
   content with 200. Sentry also negotiates TLS 1.0 and TLS 1.1, with cipher

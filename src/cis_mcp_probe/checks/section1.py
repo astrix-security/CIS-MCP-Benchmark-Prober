@@ -57,20 +57,16 @@ INVALID_PARAMS = -32602
 # The recommendation's own floor: "do not serve revisions earlier than 2025-06-18".
 FLOOR_REVISION = "2025-06-18"
 
-# The published MCP revisions, offered one per initialize to enumerate what a server
-# serves when server/discover is unreachable.
-PUBLISHED_REVISIONS = (
-    "2024-11-05",
-    "2025-03-26",
-    "2025-06-18",
-    "2025-11-25",
-    RC_VERSION,
-)
+# The published MCP revisions earlier than the floor. These are the only ones the
+# sweep offers: the floor test asks whether any sub-floor revision is served, and
+# probing the revisions at or above the floor cannot change that answer. Keeping the
+# sweep to two requests also keeps the whole check within nine requests per run, which
+# matters -- a five-revision sweep provoked connection refusals from one live server.
+SUB_FLOOR_REVISIONS = ("2024-11-05", "2025-03-26")
 
 STALE_VERSION = "2025-03-26"  # a supported-but-old header, for the disagreement probe
 BOGUS_VERSION = "2024-01-01"  # never a published revision
 
-SERVER_INFO_KEY = "io.modelcontextprotocol/serverInfo"
 PROTOCOL_VERSION_KEY = "io.modelcontextprotocol/protocolVersion"
 
 _AUDIT_META = {
@@ -122,10 +118,13 @@ def _resolve(check: Check, legs: list[tuple[str, str, str]], suffix: str = "", *
     return check._pass(evidence, **details)
 
 
-def _tools_list(version: str | None = None, *, omit_meta: bool = False) -> dict[str, Any]:
-    """A tools/list request, optionally asserting ``version`` in ``_meta``."""
-    if omit_meta:
-        return {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+def _tools_list(version: str | None = None) -> dict[str, Any]:
+    """A tools/list request, asserting ``version`` in ``_meta`` when one is given.
+
+    Every probe carries the auditor's ``clientInfo``, so an operator reading their own
+    logs can tell this probe's traffic from a real client's. With ``version`` omitted
+    the envelope is complete except for the version field, which is leg 1.1d's shape.
+    """
     meta = dict(_AUDIT_META)
     if version is not None:
         meta[PROTOCOL_VERSION_KEY] = version
@@ -152,6 +151,8 @@ def _version_leg(
     An empty or non-JSON body is ERROR, never FAIL. A bare rejection may have come
     from a gateway that never reached the origin, so it says nothing about the server.
     """
+    if text.startswith("__transport_failure__"):
+        return "error", f"the probe could not be sent: {text.split(' ', 1)[1]}"
     if not text.strip():
         return "error", "no response from the endpoint"
     if data is None:
@@ -165,7 +166,9 @@ def _version_leg(
     code = jsonrpc_error_code(data)
     if code == expected:
         if status == 400:
-            return "pass", f"rejected with HTTP 400 and {expected_name}"
+            supported = ((data.get("error") or {}).get("data") or {}).get("supported")
+            names = f", server supports {supported}" if supported else ""
+            return "pass", f"rejected with HTTP 400 and {expected_name}{names}"
         return (
             "fail",
             (
@@ -417,6 +420,7 @@ class ProtocolVersionPinning(Check):
         Both routes measure the revisions the endpoint serves, which is what the
         Recommendation requires over the ones it accepts per request.
         """
+        discover_note = ""
         if ctx.rc_supported:
             status, data, _text = await _server_discover(ctx)
             result = (data or {}).get("result")
@@ -437,22 +441,63 @@ class ProtocolVersionPinning(Check):
                         f"array (HTTP {status}), so the served set cannot be enumerated"
                     ),
                 )
+            discover_note = (
+                f", after server/discover was attempted and rejected (HTTP {status}, "
+                f"code {jsonrpc_error_code(data)})"
+            )
 
-        served = await self._sweep(ctx)
-        outcome, note = _floor_verdict(served)
-        return "1.1a", outcome, f"{note}, enumerated by negotiation"
+        sub_floor, unreached = await self._sweep(ctx)
+        if sub_floor:
+            return (
+                "1.1a",
+                "fail",
+                (
+                    f"serves {', '.join(sub_floor)}, earlier than the "
+                    f"{FLOOR_REVISION} floor this Recommendation sets, so an "
+                    f"unapproved revision is reachable by negotiation; the operator "
+                    f"allowlist itself was not read{discover_note}"
+                ),
+            )
+        if unreached:
+            # An unreached revision could be the served sub-floor one, so a compliant
+            # reading is not attributable. A FAIL above needs no such caution, because
+            # a sub-floor revision was positively observed.
+            return (
+                "1.1a",
+                "unknown",
+                (
+                    f"no revision earlier than the {FLOOR_REVISION} floor was found "
+                    f"to be served, but {', '.join(unreached)} could not be probed, "
+                    f"so a compliant reading is not attributable{discover_note}"
+                ),
+            )
+        return (
+            "1.1a",
+            "pass",
+            (
+                f"no revision earlier than the {FLOOR_REVISION} floor is served; the "
+                f"endpoint negotiated {ctx.negotiated_version}. The operator "
+                f"allowlist itself was not read, so a revision at or after the floor "
+                f"and outside a narrower allowlist is not detected{discover_note}"
+            ),
+        )
 
-    async def _sweep(self, ctx: ProbeContext) -> list[str]:
-        """Offer each published revision and keep the ones the server echoes back.
+    async def _sweep(self, ctx: ProbeContext) -> tuple[list[str], list[str]]:
+        """Offer each sub-floor revision, returning those served and those unreached.
 
         The specification requires a server to answer with the requested revision
         when it supports it, and with another revision it does support when it does
         not. So an echo equal to the request is positive evidence the endpoint serves
         that revision, which is the same test ``client.py`` applies for the release
         candidate.
+
+        A revision whose probe never completed is returned separately rather than
+        dropped. Silently omitting it would let a run where the offending revision
+        never answered read as compliant.
         """
-        served = []
-        for revision in PUBLISHED_REVISIONS:
+        served: list[str] = []
+        unreached: list[str] = []
+        for revision in SUB_FLOOR_REVISIONS:
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -469,18 +514,31 @@ class ProtocolVersionPinning(Check):
                 )
             except Exception as exc:  # noqa: BLE001 — one revision failing is not fatal
                 ctx.errors.append(f"1.1a sweep {revision}: {exc!r}")
+                unreached.append(revision)
                 continue
             result = (data or {}).get("result")
             if isinstance(result, dict) and result.get("protocolVersion") == revision:
                 served.append(revision)
-        return served
+        return served, unreached
 
     async def _wire_legs(self, ctx: ProbeContext) -> list[tuple[str, str, str]]:
         """The four malformed-assertion probes, adapted to the negotiated revision."""
         endpoint, token, sid = ctx.endpoint_url or "", ctx.access_token, ctx.session_id
 
         async def send(payload, **kwargs):
-            return await raw_jsonrpc(endpoint, payload, token=token, session_id=sid, **kwargs)
+            """Send one probe, reporting a transport failure rather than raising.
+
+            A dropped connection on one probe must not take the whole check out as a
+            raised exception: the other legs still have something to say, and the
+            evidence should name which probe could not be sent.
+            """
+            try:
+                return await raw_jsonrpc(
+                    endpoint, payload, token=token, session_id=sid, **kwargs
+                )
+            except Exception as exc:  # noqa: BLE001 — reported as an unreachable probe
+                ctx.errors.append(f"1.1 probe: {exc!r}")
+                return 0, None, f"__transport_failure__ {exc!r}"
 
         if ctx.rc_supported:
             b = await send(_tools_list(BOGUS_VERSION), protocol_header=BOGUS_VERSION)
@@ -498,9 +556,11 @@ class ProtocolVersionPinning(Check):
         # Before 2026-07-28 the version travels in the header alone, so the body
         # carries no version to omit and none to disagree with the header. Legs 1.1d
         # and 1.1e have no request to send and report that, rather than passing on a
-        # probe that tested nothing.
-        b = await send(_tools_list(omit_meta=True), protocol_header=BOGUS_VERSION)
-        c = await send(_tools_list(omit_meta=True), omit_protocol_header=True)
+        # probe that tested nothing. The two that do run still carry the auditor's
+        # clientInfo in _meta, so an operator reading their own logs can tell this
+        # probe's traffic from a real client's.
+        b = await send(_tools_list(), protocol_header=BOGUS_VERSION)
+        c = await send(_tools_list(), omit_protocol_header=True)
         b_outcome, b_note = _leg_1_1b(*b)
         c_outcome, c_note = _leg_1_1c(*c)
         unsupported = (
@@ -513,8 +573,9 @@ class ProtocolVersionPinning(Check):
                 "1.1c",
                 c_outcome,
                 (
-                    f"{c_note}, header omitted with no _meta version to carry, so the "
-                    f"HeaderMismatch code assertion is not applied"
+                    f"{c_note}, header omitted; before {RC_VERSION} there is no "
+                    f"_meta version for the header to be compared against, so a "
+                    f"server has only the omission to reject"
                 ),
             ),
             ("1.1d", "revision_unsupported", unsupported),
@@ -611,7 +672,7 @@ class CapabilityBaseline(Check):
             return "1.2a", "unknown", "this run observed no capability object"
 
         parts = [
-            f"{label}: {', '.join(items)}"
+            f"{label}: {', '.join(baseline.render_leaf(i) for i in items)}"
             for label, items in (
                 ("unapproved", changes["added"]),
                 ("changed", changes["changed"]),
@@ -905,6 +966,15 @@ class ServerIdentityDrift(Check):
     The audit's identity-recording leg reads a deployment capture window and is not
     probed. The verdict comes from its registry comparison, reduced to the identity
     this probe recorded itself.
+
+    The identity comes from the ``initialize`` result, where the schema requires it.
+    From 2026-07-28 a server asserts it per response in ``_meta`` instead, and reading
+    it from there is deferred rather than done here: the baseline holds one record per
+    endpoint and three checks write it, so a check that sourced the identity
+    differently from the others would have its value overwritten by whichever wrote
+    last, and the next run would read the difference as drift and fail a server that
+    changed nothing. Wiring the per-response ``_meta`` identity onto the context as one
+    shared observation is the fix, alongside the same change for the capability object.
     """
 
     id = "1.4"
@@ -921,8 +991,8 @@ class ServerIdentityDrift(Check):
         if ctx.init_result is None or not ctx.endpoint_url:
             return self._error("no session; server identity unavailable")
 
-        server_info = await self._identity(ctx)
-        current = baseline.snapshot(ctx, server_info=server_info)
+        current = baseline.snapshot(ctx)
+        server_info = getattr(ctx.init_result, "serverInfo", None)
         observed = current["server_identity"]
 
         if ctx.update_baseline:
@@ -939,22 +1009,6 @@ class ServerIdentityDrift(Check):
             self._leg_b(recorded or {}, current, observed),
         ]
         return _resolve(self, legs, suffix=DROPPED_1_4B_REVIEW)
-
-    async def _identity(self, ctx: ProbeContext) -> Any:
-        """The identity the server asserts, from wherever this revision carries it.
-
-        From 2026-07-28 a server asserts it per response in ``_meta``, so it is read
-        from a ``server/discover`` result. Earlier revisions carry it once, in the
-        ``initialize`` result, where the schema requires it.
-        """
-        if ctx.rc_supported:
-            _status, data, _text = await _server_discover(ctx)
-            result = (data or {}).get("result")
-            if isinstance(result, dict):
-                meta = result.get("_meta")
-                if isinstance(meta, dict) and isinstance(meta.get(SERVER_INFO_KEY), dict):
-                    return meta[SERVER_INFO_KEY]
-        return getattr(ctx.init_result, "serverInfo", None)
 
     def _leg_a(self, server_info: Any, observed: list[str] | None) -> tuple[str, str, str]:
         """Whether the asserted identity is well formed, reported and gating nothing.

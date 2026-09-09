@@ -33,8 +33,8 @@ def _path(endpoint: str) -> Path:
     return DATA_DIR / f"{key}.json"
 
 
-def capability_leaves(obj: Any, prefix: str = "") -> dict[str, Any]:
-    """Flatten a capability object to one entry per leaf, keyed by dotted path.
+def capability_leaves(obj: Any, path: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Flatten a capability object to one entry per leaf, keyed by its path.
 
     A leaf is a scalar, an empty object or an empty array -- the same three the
     benchmark's own audit flattens to. An empty object is a leaf rather than an
@@ -45,25 +45,45 @@ def capability_leaves(obj: Any, prefix: str = "") -> dict[str, Any]:
     a reordered array read as changed, which is correct here: the audit compares
     values at paths, and it cannot know that an order change is harmless.
 
+    The key is the path as a JSON array, which is what the audit's own expression
+    produces. Joining the segments with a separator instead would collide, because a
+    capability key may contain the separator: ``experimental`` sub-keys are
+    server-chosen and reverse-DNS names are common there, so
+    ``{"experimental": {"com.vendor.f": 1}}`` and
+    ``{"experimental": {"com": {"vendor": {"f": 1}}}}`` would flatten alike and a
+    server restructuring one into the other would report no drift.
+
     The whole object being empty is the one case that yields no leaves at all, rather
     than one leaf under the empty path. The audit walks the paths inside the
     capabilities object, so a server advertising nothing has no paths to compare, and
     recording one would make the next run report it as withdrawn.
     """
-    if not prefix and isinstance(obj, (dict, list)) and not obj:
+    if not path and isinstance(obj, (dict, list)) and not obj:
         return {}
     if isinstance(obj, dict) and obj:
         out: dict[str, Any] = {}
         for key, value in obj.items():
-            out.update(capability_leaves(value, f"{prefix}{key}."))
+            out.update(capability_leaves(value, (*path, str(key))))
         return out
     if isinstance(obj, list) and obj:
         out = {}
         for index, value in enumerate(obj):
-            out.update(capability_leaves(value, f"{prefix}{index}."))
+            out.update(capability_leaves(value, (*path, str(index))))
         return out
-    # A scalar, an empty dict or an empty list. Trim the trailing separator.
-    return {prefix[:-1]: obj}
+    return {json.dumps(list(path)): obj}
+
+
+def render_leaf(key: str) -> str:
+    """A leaf key as a reader sees it in an evidence string.
+
+    The stored key is a JSON array so that it cannot collide. An operator reading a
+    verdict wants ``resources.subscribe``, so the dotted form is produced here and
+    only here, and it is never compared.
+    """
+    try:
+        return ".".join(json.loads(key)) or "(root)"
+    except (ValueError, TypeError):
+        return key
 
 
 def _identity_pair(server_info: Any) -> list[str] | None:
@@ -178,6 +198,17 @@ def diff(baseline: dict[str, Any], current: dict[str, Any]) -> dict[str, list[st
     return added
 
 
+def _json_array_keys(leaves: dict[str, Any]) -> bool:
+    """Whether every key is a JSON array, which is the current leaf-key format."""
+    for key in leaves:
+        try:
+            if not isinstance(json.loads(key), list):
+                return False
+        except (ValueError, TypeError):
+            return False
+    return True
+
+
 def compare_leaves(
     record: dict[str, Any], current: dict[str, Any]
 ) -> tuple[dict[str, list[str]], str | None]:
@@ -206,7 +237,10 @@ def compare_leaves(
     """
     empty: dict[str, list[str]] = {"added": [], "changed": [], "withdrawn": []}
     recorded = record.get("capability_leaves")
-    if recorded is None:
+    if recorded is None or not _json_array_keys(recorded):
+        # A record with no leaves, or with leaves keyed in the earlier dotted format,
+        # cannot be compared. Reading a format change as drift would report every
+        # leaf as both added and withdrawn, and fail a server that changed nothing.
         return empty, "record"
     observed = current.get("capability_leaves")
     if observed is None:
