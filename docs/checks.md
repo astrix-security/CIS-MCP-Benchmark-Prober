@@ -935,8 +935,8 @@ arbitrary tool surface with traversal values.
 ## Results against tested servers
 
 Sections 1 and 2 were probed on 2026-08-12 against hosted MCP servers, using the
-checks as described above. Section 3 was probed later, against a smaller target
-set, and has its own table and dates below.
+checks as described above. Section 3 and Section 10 were probed later, against
+smaller target sets, and each has its own table and dates below.
 
 | Server | Endpoint | Auth | Protocol negotiated |
 |--------|----------|------|---------------------|
@@ -1417,11 +1417,206 @@ request then presents a credential the server has retired and draws `401`, which
 check reports as undecided rather than as a finding. That is what happened to 7.1.2 on
 Notion: the same request with a freshly read token returns `400` and `-32600`, the
 clean refusal.
+## Section 10 — caching and resource limits
+
+### 10.1 Static resources are cached with freshness limits and per-user data is never shared-cached
+
+**Level:** L1 · **Benchmark assessment status:** Manual
+
+**What the check requires.** Two caching layers. At the HTTP layer, static resource
+content carries a validator — `ETag` or `Last-Modified` — together with a
+`Cache-Control` `max-age`, and carries no `no-store` or `private` directive
+alongside that caching; and dynamic or identity-sensitive content is marked
+`no-store` or `private`. At the protocol layer, the 2026-07-28 revision requires the
+fields `resultType`, `ttlMs` and `cacheScope` on every cacheable result.
+
+**How the probe implements it.** Three legs, two of them graded.
+
+- `10.1a` — the cache headers of one static resource. The path is an operator input.
+  A resource carrying `no-store` or `private` alongside caching is `FAIL`, which is
+  the contradictory-directive condition and is tested before the validator
+  condition. A validator together with a `max-age` is `PASS`. Neither is `FAIL`.
+- `10.1b` — the `Cache-Control` on the MCP endpoint's own response to a `tools/list`
+  POST, read as dynamic content. `no-store` or `private` present as a directive is
+  `PASS`; neither is `FAIL`. `no-cache` alone does not pass. Where an operator names
+  a per-user path, that path is read instead and the evidence says so.
+- `10.1c` — which of `resultType`, `ttlMs` and `cacheScope` a result carries. Read
+  from the response leg `10.1b` already fetched, so it costs no request. Reported
+  only: the check's verdict never moves on it.
+
+**A directive is matched as a whole token**, after splitting on commas and trimming,
+so `no-store` does not match inside `no-store-remote`. That is how the benchmark's
+own audit matches them.
+
+**A status at or above 400 is `ERROR`, not `FAIL`.** Cache policy cannot be
+attributed to a resource that did not serve. A 401 challenge, a 403, a 429 and a 502
+all carry no `Cache-Control` and no content, so reading a missing directive on one of
+them as non-compliance would assert something the response does not show. This is
+also what makes reading the endpoint's own response safe on a run that never
+authenticated.
+
+**A redirect is `UNKNOWN`, and it is not followed.** A redirect response is not the
+resource, so its headers say nothing about the resource's cache policy. Without this
+a static path redirected to a CDN would read as "lacks a validator", and a per-user
+path redirected to a login page as "lacks a `no-store` directive". A 304 is the
+exception and is graded: a conditional-request answer comes from the resource itself
+and carries its policy.
+
+**An operator-named per-user path is fetched with the bearer token**, where the run
+holds one and the path is a credential-safe target — https, and on the endpoint's own
+registrable domain. A per-user resource is identity-scoped by definition, so a
+token-less request would draw a 401 on any server that requires authentication and
+leave the leg undecidable. A plaintext path receives no credential, and the evidence
+states whether the token was sent.
+
+**What the probe cannot reach.**
+
+- **`10.1a` reports `UNKNOWN` on a pure MCP endpoint, and that is the expected
+  outcome.** The path cannot be discovered: MCP defines no HTTP static asset, and
+  `resources/list` returns protocol-layer URIs rather than files at a path. No path
+  is guessed, because a guessed path that did answer would belong to the vendor's
+  web application rather than the audited server, and the verdict would be
+  attributed to the wrong thing. The leg fires on a deployment that co-hosts static
+  assets behind the same hostname.
+- **Two substitutions on `10.1b`'s default substrate**, both named in the evidence.
+  The audit reads a GET of a path where this reads a POST response; and a shared
+  cache does not store a POST response by default, so the confidentiality exposure
+  is thinner than the audit's GET case. Neither applies where an operator names a
+  per-user path.
+- **Whether a resource is per-user is not inferred from authentication.** A `public`
+  result may be shared across callers even from an authenticated endpoint, so only an
+  operator can identify a per-user resource. That is why `10.1c` carries no verdict
+  and why `10.1b`'s per-user substrate is an operator input.
+- **An operator path must resolve to the endpoint's own registrable domain.** One
+  that does not is `UNKNOWN` naming the mismatch, and no request is made: a verdict
+  from another host would be attributed to the wrong server.
+
+### 10.2 Request and response body size limits, token budgets, and per-principal quotas are enforced
+
+**Level:** L1 · **Benchmark assessment status:** Manual
+
+**What the check requires.** A maximum size on every inbound JSON-RPC request body.
+Bounds on a non-streaming result payload and on each message of a streamed response.
+Token budgets per request and per workload. Per-principal and per-tenant quotas
+enforced independently of the global rate limits. And the body-size limit holding at
+both the reverse proxy and the MCP application middleware.
+
+**How the probe implements it.** One leg, `10.2a`, in a fixed order.
+
+1. Resolve the probe size. Without an operator entry it is 1 MiB, which matches the
+   recommendation's own configuration illustration and the common reverse-proxy
+   default. An operator may state the limit their deployment enforces instead.
+2. Send a control `tools/list` carrying the envelope, headers and credential the
+   negotiated revision requires. The benchmark states that a conforming server
+   accepts this request.
+3. Read the control's outcome. Anything but a 2xx stops here.
+4. Send the same request padded past the probe size, with redirects disabled.
+
+| Response to the padded body | Verdict |
+|---|---|
+| 413 | `PASS` — a limit is enforced at or below the size sent |
+| 2xx, and the operator stated the limit | `FAIL` |
+| 2xx, and the probe used its default | `UNKNOWN`, naming the size sent |
+| 3xx | `UNKNOWN` |
+| the connection closed, or the write timed out | `UNKNOWN` |
+| any other status | `UNKNOWN` |
+| the control answered, but not with a 2xx | `UNKNOWN`, and no padded body is sent |
+| the control did not answer at all | `ERROR` |
+
+**`PASS` needs no configuration; `FAIL` needs the operator's number.** A 413 proves a
+limit at or below the size sent whatever the deployment configured. A 2xx proves only
+that no limit sits at or below that size, which is a weaker claim than no limit at
+all — so without a stated limit the leg reports `UNKNOWN` naming the size it sent,
+rather than asserting non-compliance from a number nobody supplied.
+
+**Raising the probe size needs consent; the default does not.** At 1 MiB the request
+is ordinary traffic that a large tool argument could reach. Above that it is not, so
+a stated limit greater than the default also requires the operator to record their
+authorisation, and any value above 10 MiB is refused whatever the authorisation. That
+ceiling admits the largest limit a real deployment configures and refuses what a typo
+produces — a limit stated in bits, or one carrying an extra digit.
+
+**Redirects are disabled on the padded request, and a 3xx is `UNKNOWN`.** Following a
+307 or a 308 would re-send the whole body to a location the server chose, past the
+host guard.
+
+**What the probe cannot reach.** A `PASS` covers one of the recommendation's six
+obligations. The evidence names the other five on every run, because the benchmark
+assigns all five to configuration review and a load test: bounds on a non-streaming
+response payload, bounds on each message of a streamed response, per-request and
+per-workload token budgets, per-principal quota exhaustion returning a clear error
+rather than silently queuing, and enforcement at both the reverse proxy and the
+application middleware. Provoking quota exhaustion on a live server is a
+denial-of-service test rather than an audit, so the probe does not attempt it.
+
+**Operator inputs, and what each one changes.**
+
+| Input | Effect if absent |
+|---|---|
+| `static_resource_path` | `10.1a` is `UNKNOWN`. No other leg is affected. |
+| `per_user_resource_path` | `10.1b` reads the endpoint's own response and still reaches a verdict. |
+| `max_request_bytes` | `10.2a` probes at 1 MiB, can reach `PASS`, and can never reach `FAIL`. |
+| `oversize_authorised` | Needed only to set `max_request_bytes` above 1 MiB. |
+### Section 10 results
+
+Three targets carry a Section 10 column, all probed with **no operator entry**, so
+every input the two checks accept was absent. Stripe carries none: its
+re-authentication opened a browser and the redirect never returned, so no
+authenticated run was obtained.
+
+| # | Check | deepwiki | linear | sentry |
+|---|---|---|---|---|
+| — | **Negotiated revision** | **2025-11-25** | **2025-11-25** | **2025-11-25** |
+| — | Run date | 2026-09-10 | 2026-09-10 | 2026-09-10 |
+| 10.1 | Static cached with validators, per-user never shared-cached | **FAIL** | **FAIL** | **FAIL** |
+| 10.2 | Request-body size limit enforced | UNKNOWN | UNKNOWN | UNKNOWN |
+
+Per leg:
+
+| Leg | deepwiki | linear | sentry |
+|---|---|---|---|
+| 10.1a static resource | UNKNOWN | UNKNOWN | UNKNOWN |
+| 10.1b dynamic content | **FAIL** | **FAIL** | **FAIL** |
+| 10.1c cacheable fields | reported | reported | reported |
+| 10.2a oversized body | UNKNOWN | UNKNOWN | UNKNOWN |
+| 10.2b the five deferred obligations | not probed | not probed | not probed |
+
+### Reading the Section 10 results
+
+- **10.1 — 0/3 pass, and all three fail on the same header.** Every server answers
+  `Cache-Control: no-cache, no-transform` on an authenticated 200. `no-cache` bars
+  reuse without revalidation, but the recommendation requires `no-store` or `private`
+  and states that `no-cache` alone does not pass. So the benchmark is stricter here
+  than common HTTP practice, and a POST response is not shared-cached by default in
+  any case. The verdict follows the recommendation, and this note records the gap
+  between the two.
+- **10.1a — `UNKNOWN` on all three, as expected.** None of the three is a web server,
+  and no operator named a static path. This leg decides only on a deployment that
+  co-hosts static assets behind the same hostname.
+- **10.1c — no server carries the fields.** All three negotiate 2025-11-25, which does
+  not define `resultType`, `ttlMs` or `cacheScope`, so their absence is not a
+  deviation and the evidence says so. On a server negotiating 2026-07-28 the same
+  absence would be reported as a schema deviation instead. Either way the leg carries
+  no verdict.
+- **10.2 — `UNKNOWN` on all three, and never `FAIL`.** Each accepted a 1 MiB body with
+  a 200 while its control also answered 200. That shows no limit at or below 1 MiB; it
+  does not show that no limit exists, so none of the three is reported as
+  non-compliant. Setting `max_request_bytes` to a deployment's configured limit is
+  what turns this into a decision.
+
+Both `PASS` branches were exercised against a local fixture rather than a live
+server, because no server in this table produces either one: a fixture answering
+`Cache-Control: no-store` passes `10.1b`, and one rejecting an oversized body with
+413 passes `10.2a`.
 
 ### Servers not covered
 
 - **Sentry** (`mcp.sentry.dev`) was unreachable during Section 3 testing, so it
-  carries Section 1 and 2 verdicts only.
+  carries Section 1, 2 and 10 verdicts only.
+- **Stripe** (`mcp.stripe.com`) carries no Section 10 column. Its cached client
+  registration pins a loopback callback port that changes between runs, so every run
+  needs a fresh login; the browser opened and the redirect did not return, so the run
+  produced no authenticated session.
 - **Notion** (`mcp.notion.com`) could not be probed. During testing the host was
   reached through a TLS inspection proxy, so the certificate chain presented was
   not Notion's. Any transport verdict would have described the proxy rather than
