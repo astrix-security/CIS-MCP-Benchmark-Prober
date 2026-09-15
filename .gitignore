@@ -9,8 +9,11 @@ wheels/
 # Virtual environments
 .venv
 
-# CIS benchmark source PDFs (draft/confidential — do not commit)
-/benchmark/
+# CIS benchmark sources and working notes (draft/confidential — do not commit).
+# No trailing slash: with one, the pattern matches a directory only, and a symlink of
+# the same name is still tracked. One was committed that way, and checking it out
+# replaced the real directory.
+/benchmark
 
 # Benchmark spreadsheets, wherever they land. Draft revisions arrive as .xlsx in
 # the repository root, which /benchmark/ does not cover.
