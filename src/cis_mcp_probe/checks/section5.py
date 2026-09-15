@@ -396,8 +396,7 @@ def _leg_external_refs(ctx: ProbeContext) -> tuple[str, str, str]:
     names = [
         t.name
         for t in ctx.tools
-        if compile_schema(t.inputSchema)[2]
-        or (t.outputSchema is not None and compile_schema(t.outputSchema)[2])
+        if _has_external_ref(t.inputSchema) or _has_external_ref(t.outputSchema)
     ]
     if not names:
         return "5.1.1c", "", "no advertised schema carries an external $ref"
@@ -527,12 +526,22 @@ def _substitute_template(uri_template: str) -> str | None:
 
 
 def _first_required_prompt(raw: dict) -> dict | None:
-    """The first advertised prompt carrying a required argument, from raw JSON."""
+    """The first advertised prompt carrying a required argument, from raw JSON.
+
+    A prompt is a candidate only if it also declares a non-empty string name: the
+    caller sends that name in a prompts/get, so a nameless entry is unusable here.
+    Any entry of another shape is skipped rather than graded.
+    """
     prompts = (raw.get("result") or {}).get("prompts")
     if not isinstance(prompts, list):
         return None
     for prompt in prompts:
-        args = prompt.get("arguments") if isinstance(prompt, dict) else None
+        if not isinstance(prompt, dict):
+            continue
+        name = prompt.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        args = prompt.get("arguments")
         if isinstance(args, list) and any(
             isinstance(a, dict) and a.get("required") for a in args
         ):
@@ -609,7 +618,11 @@ def _leg_mime_type(ctx: ProbeContext) -> tuple[str, str, str]:
 
 
 def _leg_argument_names(raw: dict) -> tuple[str, str, str]:
-    """Every declared prompt argument names its parameter, read from raw JSON."""
+    """Every declared prompt argument names its parameter, read from raw JSON.
+
+    A prompt or argument entry that is not a JSON object declares no argument name to
+    grade, so it is skipped rather than counted.
+    """
     prompts = _raw_prompts(raw)
     if prompts is None:
         return (
@@ -622,8 +635,10 @@ def _leg_argument_names(raw: dict) -> tuple[str, str, str]:
     bad = [
         f"{p.get('name')!r} argument {a.get('name')!r}"
         for p in prompts
+        if isinstance(p, dict)
         for a in (p.get("arguments") or [])
-        if not isinstance(a.get("name"), str) or not a["name"].strip()
+        if isinstance(a, dict)
+        and (not isinstance(a.get("name"), str) or not a["name"].strip())
     ]
     if bad:
         return "5.1.3a", "fail", f"non-string or empty argument name: {'; '.join(bad)}"
@@ -635,6 +650,9 @@ def _leg_required_boolean(raw: dict) -> tuple[str, str, str]:
 
     Read raw, because Pydantic runs in lax mode and coerces "yes", "1", 1 and 1.0 to
     True -- so a leg reading ctx.prompts would pass the violation it tests.
+
+    A prompt or argument entry that is not a JSON object declares no ``required`` to
+    grade, so it is skipped rather than counted.
     """
     prompts = _raw_prompts(raw)
     if prompts is None:
@@ -648,8 +666,11 @@ def _leg_required_boolean(raw: dict) -> tuple[str, str, str]:
     bad = [
         f"{p.get('name')!r} argument {a.get('name')!r} declares required={a['required']!r}"
         for p in prompts
+        if isinstance(p, dict)
         for a in (p.get("arguments") or [])
-        if "required" in a and not isinstance(a["required"], bool)
+        if isinstance(a, dict)
+        and "required" in a
+        and not isinstance(a["required"], bool)
     ]
     if bad:
         return "5.1.3b", "fail", "; ".join(bad)
@@ -770,6 +791,7 @@ async def _leg_missing_argument(
                 f"the control prompts/get for {name!r} returned no messages, so a "
                 "missing-argument rejection could not be attributed"
             ),
+            False,
         )
     data = await _get_prompt(ctx, 3, name, {})
     outcome, note = _refusal_outcome(jsonrpc_error_code(data), bool(data.get("result")))
@@ -909,14 +931,25 @@ def _revision_gate(rc_supported: bool, rc_version: str | None) -> str:
 
 
 def _status_outcome(status: int | None) -> tuple[str, str]:
-    """Classify a GET or DELETE status against the required 405."""
+    """Classify a GET or DELETE status against the required 405.
+
+    405 is the only refusal the recommendation names as compliant, and a 2xx is the
+    legacy surface being served. Any other status -- a proxy's 403, a rate limiter's
+    429, a gateway's 502 -- can be returned without the request reaching the server
+    under audit, and this leg pair sends no control request to attribute it with, so
+    such a status measures nothing.
+    """
     if status is None:
         return "error", "no status returned, so the result is not attributable"
     if status == 405:
         return "pass", "405, no legacy surface exposed"
     if 200 <= status < 300:
         return "fail", f"{status} served, the legacy surface is exposed"
-    return "pass", f"{status}, a rejection but a deviation from the recommended 405"
+    return "error", (
+        f"{status} is neither the required 405 nor a served response, and is not "
+        "attributable to the server: a proxy, a gateway or a rate limiter returns "
+        "that status too"
+    )
 
 
 def _tools_list_body(req_id: int) -> dict:
@@ -1198,7 +1231,10 @@ class PathTraversalPrevented(Check):
         if ctx.session is None:
             return self._error("no live session to read through" + reduction)
 
-        control = inputs.load(ctx.domain).get("traversal_control_uri")
+        # Only a non-empty string is usable, because the traversal below is built by
+        # string concatenation on this URI. Anything else counts as absent.
+        supplied = inputs.load(ctx.domain).get("traversal_control_uri")
+        control = supplied if isinstance(supplied, str) and supplied.strip() else ""
         source = "operator-supplied"
         if not control and ctx.resources:
             control, source = str(ctx.resources[0].uri), "derived from ctx.resources[0]"
