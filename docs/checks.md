@@ -1449,11 +1449,13 @@ so `no-store` does not match inside `no-store-remote`. That is how the benchmark
 own audit matches them.
 
 **A status at or above 400 is `ERROR`, not `FAIL`.** Cache policy cannot be
-attributed to a resource that did not serve. A 401 challenge, a 403, a 429 and a 502
-all carry no `Cache-Control` and no content, so reading a missing directive on one of
-them as non-compliance would assert something the response does not show. This is
-also what makes reading the endpoint's own response safe on a run that never
-authenticated.
+attributed to a resource that did not serve. A 403, a 429 and a 502 all carry no
+`Cache-Control` and no content, so reading a missing directive on one of them as
+non-compliance would assert something the response does not show. A 401 is the one
+exception: on a request that carried no credential, the refusal is fully explained by
+that alone, so the leg is `UNKNOWN` rather than `ERROR` — a later run that holds a
+credential may decide. A 401 on a request that did carry a credential stays `ERROR`,
+because then the refusal has no attributable cause.
 
 **A redirect is `UNKNOWN`, and it is not followed.** A redirect response is not the
 resource, so its headers say nothing about the resource's cache policy. Without this

@@ -145,16 +145,21 @@ def _has_max_age(tokens: list[str]) -> bool:
 
 
 def _status_gate(
-    status: object, error: str | None, label: str
+    status: object, error: str | None, label: str, *, has_credential: bool
 ) -> tuple[str, str] | None:
     """Return an outcome when cache policy cannot be attributed, else None.
 
     Three conditions, and the first two are the audit's own branch in both of its
     HTTP scripts: a request that never answered or a non-numeric status, and a status
-    at or above 400. Both are ERROR. That is what keeps a 401 challenge, a 403, a 429
-    and a 502 -- none of which carries a ``Cache-Control`` or any content -- from
-    reading as a FAIL on a missing directive, and it is what makes grading the
-    endpoint's own response safe on a run that never authenticated.
+    at or above 400. Both are ERROR. That is what keeps a 403, a 429 and a 502 --
+    none of which carries a ``Cache-Control`` or any content -- from reading as a
+    FAIL on a missing directive.
+
+    401 is the one exception, and only when this request carried no credential:
+    the refusal is then fully explained by that alone, so it is UNKNOWN rather than
+    ERROR -- a later run that holds a credential may decide. A 401 on a request that
+    did carry a credential stays ERROR, because then the refusal has no attributable
+    cause.
 
     The third is a redirect, which is UNKNOWN. ``raw_get`` does not follow one, so a
     301 or a 302 arrives as the status and is below 400: without this branch a static
@@ -178,6 +183,12 @@ def _status_gate(
             "headers say nothing about the resource's cache policy. The redirect was "
             "not followed"
         )
+    if status == 401 and not has_credential:
+        return "unknown", (
+            f"{label} answered 401 and this run holds no credential for it, so the "
+            "refusal is fully explained by that; a later run with a credential may "
+            "decide"
+        )
     if status >= 400:
         return "error", (
             f"{label} returned {status}, so cache policy cannot be attributed to "
@@ -187,7 +198,12 @@ def _status_gate(
 
 
 def _static_verdict(
-    status: object, headers: dict[str, str], error: str | None, label: str
+    status: object,
+    headers: dict[str, str],
+    error: str | None,
+    label: str,
+    *,
+    has_credential: bool,
 ) -> tuple[str, str]:
     """Grade a static resource's cache headers, in the audit's own branch order.
 
@@ -195,7 +211,7 @@ def _static_verdict(
     matching the script: a resource carrying ``max-age`` alongside ``no-store`` is
     FAIL even though it also carries a validator.
     """
-    gate = _status_gate(status, error, label)
+    gate = _status_gate(status, error, label, has_credential=has_credential)
     if gate is not None:
         return gate
 
@@ -222,14 +238,19 @@ def _static_verdict(
 
 
 def _dynamic_verdict(
-    status: object, headers: dict[str, str], error: str | None, label: str
+    status: object,
+    headers: dict[str, str],
+    error: str | None,
+    label: str,
+    *,
+    has_credential: bool,
 ) -> tuple[str, str]:
     """Grade dynamic content's cache headers: no-store or private, or FAIL.
 
     ``no-cache`` alone does not pass. The audit is explicit about it, matching
     ``no-store`` and ``private`` as directives and nothing else.
     """
-    gate = _status_gate(status, error, label)
+    gate = _status_gate(status, error, label, has_credential=has_credential)
     if gate is not None:
         return gate
 
@@ -380,7 +401,12 @@ async def _leg_static(
             f"the host guard refused {url}, so no request was made; a refusal by "
             "our own guard is not a finding about the server"
         )
-    return _static_verdict(status, headers, error, f"static resource {url}")
+    # No credential ever goes with this request: the static path may belong to a
+    # different origin's web application, so no token is sent to it (see raw_get
+    # above). A 401 here is always attributable to that alone.
+    return _static_verdict(
+        status, headers, error, f"static resource {url}", has_credential=False
+    )
 
 
 async def _leg_dynamic(
@@ -403,7 +429,11 @@ async def _leg_dynamic(
     path = inputs.resource_path(entry, "per_user_resource_path")
     if path is None:
         outcome, note = _dynamic_verdict(
-            status, headers, error, "the endpoint's own tools/list response"
+            status,
+            headers,
+            error,
+            "the endpoint's own tools/list response",
+            has_credential=bool(ctx.access_token),
         )
         return outcome, note + (
             " [substrate: the endpoint's own response, graded as dynamic content, "
@@ -435,7 +465,11 @@ async def _leg_dynamic(
             "our own guard is not a finding about the server"
         )
     outcome, note = _dynamic_verdict(
-        own_status, own_headers, own_error, f"per-user resource {url}"
+        own_status,
+        own_headers,
+        own_error,
+        f"per-user resource {url}",
+        has_credential=credentialed,
     )
     sent = "with the bearer token" if credentialed else "with no credential"
     return outcome, note + (
@@ -542,8 +576,7 @@ async def _leg_body_limit(
     # ONE request, padded. Any header the control sends and this one does not is a
     # difference unrelated to size: without Accept, a conforming streamable-HTTP
     # server answers 406, and the leg would read its own malformed request as the
-    # server's way of signalling oversize. Measured against a live server before this
-    # was fixed: 406 on the padded body against a 200 control.
+    # server's way of signalling oversize.
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",

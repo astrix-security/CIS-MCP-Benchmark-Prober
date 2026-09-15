@@ -143,13 +143,21 @@ def probe_body_size(entry: dict) -> tuple[int | None, int | None, str | None]:
     if stated > ABSOLUTE_CEILING:
         reason = (
             f"max_request_bytes is {stated}, above the {ABSOLUTE_CEILING}-byte "
-            "ceiling this tool will send whatever the authorisation"
+            "ceiling, which is absolute: no authorisation raises it"
         )
         return None, None, reason
-    if stated > DEFAULT_PROBE_BYTES and not entry.get("oversize_authorised"):
+    authorised = entry.get("oversize_authorised")
+    # Only the JSON boolean true authorises: a string like "false", or a number,
+    # is truthy in Python but is not the operator's consent, so it is treated the
+    # same as an absent key rather than silently accepted.
+    if stated > DEFAULT_PROBE_BYTES and authorised is not True:
+        if authorised is None:
+            detail = "oversize_authorised is not set"
+        else:
+            detail = f"oversize_authorised is {authorised!r}, not the JSON boolean true"
         reason = (
             f"max_request_bytes is {stated}, above the {DEFAULT_PROBE_BYTES}-byte "
-            "default, and oversize_authorised is not set"
+            f"default, and {detail}"
         )
         return None, None, reason
     return stated, stated, None
