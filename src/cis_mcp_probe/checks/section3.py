@@ -2113,6 +2113,25 @@ def _rotated_refresh(body: str, spent: str) -> str | None:
     return None
 
 
+async def _discard_spent_refresh(
+    store: FileTokenStorage, stored: OAuthToken | None
+) -> str:
+    """Drop the cached refresh token, keeping the access token, and say so.
+
+    Returns the sentence to append to the leg's evidence, or "" when there was no
+    refresh token to drop. The access token stays: later checks and the report read
+    it from the context, and it is not what a reuse detector revokes on.
+    """
+    if stored is None or not getattr(stored, "refresh_token", None):
+        return ""
+    await store.set_tokens(stored.model_copy(update={"refresh_token": None}))
+    return (
+        ". The cached refresh token was spent by this leg and has been discarded "
+        "rather than left for the next run to present again, so the next run against "
+        "this server needs a fresh login"
+    )
+
+
 async def _restore_refresh_chain(
     ctx: ProbeContext,
     store: FileTokenStorage,
@@ -2184,7 +2203,14 @@ class AudienceBinding(Check):
     Reads the token's audience, presents the token to a downstream identity
     endpoint on the endpoint's own registrable domain, and asks the
     authorization server for a token bound to a different resource.
+
+    That last request spends the cached refresh token, so this check runs after every
+    check that needs a working credential. Check 7.2.1 runs after it, because the
+    token this check mints is the only thing 7.2.1 has to present.
     """
+
+    # Spends the cached refresh token. See the class docstring.
+    run_last = 20
 
     id = "3.3.1"
     title = (
@@ -2401,12 +2427,21 @@ class AudienceBinding(Check):
             form["client_secret"] = secret
 
         status, _, text, error = await raw_post_form(token_endpoint, form)
+
+        # The request is out, so treat the cached refresh token as gone whatever the
+        # answer was. An authorization server that rotates on redemption consumes it
+        # before it reads the resource parameter, and it returns no replacement with
+        # an error, so what the run still holds is spent. Presenting it again is a
+        # reuse, and a server that detects reuse revokes the whole family -- the
+        # access token with it, mid-run, for every check that follows.
+        spent = await _discard_spent_refresh(store, stored)
+
         if error:
             return (
                 "unknown",
                 f"the token request to {token_endpoint} did not complete "
                 f"({error}), so no token was minted for "
-                f"{WRONG_AUDIENCE_RESOURCE}",
+                f"{WRONG_AUDIENCE_RESOURCE}{spent}",
             )
 
         minted = _minted_token(text)
@@ -2417,7 +2452,7 @@ class AudienceBinding(Check):
                 "the authorization server refused to mint a token for "
                 f"{WRONG_AUDIENCE_RESOURCE} ({refusal}), which is the conforming "
                 "refusal and leaves the audited server's own audience validation "
-                "untested",
+                f"untested{spent}",
             )
 
         # Keep the token for any later check that needs one bound elsewhere. A
@@ -2440,8 +2475,8 @@ class AudienceBinding(Check):
             )
         else:
             restored = (
-                "the authorization server returned no new refresh token, so the "
-                "cached one still stands"
+                "the authorization server returned no new refresh token, and the one "
+                f"this leg spent is gone{spent}"
             )
 
         outcome, note = await self._compare_minted(ctx, minted)
