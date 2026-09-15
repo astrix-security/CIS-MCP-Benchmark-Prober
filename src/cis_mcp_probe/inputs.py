@@ -2,8 +2,10 @@
 
 Each needs something no black-box probe can derive: a downstream resource API to
 present our token to, a tool to call for a scope-enforcement probe, and arguments
-valid for a tool this probe invokes. The file is optional, and a check with no entry
-records ``unknown`` for that leg rather than being gated on the file.
+valid for a tool this probe invokes. The file is optional. A check with no entry
+records ``unknown`` for that leg rather than being gated on the file, except leg
+1.3a: its control probe must execute cleanly, so a control tool that requires
+arguments and has none supplied makes that leg record an error instead.
 
 Keyed by the domain the operator typed, not by endpoint URL, because
 ``_detect_endpoint`` has not run when this is read. That is why the shape differs
@@ -81,17 +83,20 @@ def tool_arguments(domain: str) -> dict[str, dict]:
 
 
 def missing_input_notice(domain: str, entry: dict) -> str | None:
-    """Name which checks will record `unknown` on `domain` for want of an input."""
+    """Name which checks are affected by a missing input for `domain`, and how."""
     missing = []
     if not entry.get("downstream_endpoints"):
-        missing.append("3.3.1c (no downstream_endpoints)")
+        missing.append("3.3.1c (no downstream_endpoints) will record unknown")
     if not entry.get("scope_probe_tool"):
-        missing.append("3.3.4e (no scope_probe_tool)")
+        missing.append("3.3.4e (no scope_probe_tool) will record unknown")
     if not entry.get("tool_arguments"):
-        missing.append("1.3a (no tool_arguments, so a tool needing arguments cannot be invoked)")
+        missing.append(
+            "1.3a (no tool_arguments) will record an error, not unknown, if the "
+            "tool it picks as a control requires arguments"
+        )
     if not missing:
         return None
     return (
         f"probe-inputs.json has no entry (or an incomplete one) for {domain!r}: "
-        f"{'; '.join(missing)} will record unknown. See {PATH}."
+        f"{'; '.join(missing)}. See {PATH}."
     )

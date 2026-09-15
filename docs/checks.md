@@ -137,9 +137,9 @@ to name a pending or unauthorized state, on either carrier a denial can arrive b
 JSON-RPC error from a gateway, or a result carrying `isError` from a gate inside the
 server's own tool handling.
 
-Reaching the staged tool is a failure. A `-32602` invalid-params error counts as
-reaching it, because the server had to resolve the name and validate arguments to
-produce it.
+Reaching the staged tool is a failure. A `-32601` method-not-found or `-32602`
+invalid-params error is `UNKNOWN` instead: the staged name did not resolve, or its
+arguments were rejected, so nothing about a staging gate was tested.
 
 **Arguments.** They cannot be derived from a schema safely, so they come from a
 `tool_arguments` entry in `~/.cis-mcp-probe/probe-inputs.json`, keyed by tool name.

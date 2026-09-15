@@ -54,6 +54,9 @@ UNSUPPORTED_PROTOCOL_VERSION = -32022
 HEADER_MISMATCH = -32020
 INVALID_PARAMS = -32602
 
+# The JSON-RPC code for a method or tool name the server does not recognise.
+METHOD_NOT_FOUND = -32601
+
 # The recommendation's own floor: "do not serve revisions earlier than 2025-06-18".
 FLOOR_REVISION = "2025-06-18"
 
@@ -355,21 +358,30 @@ def _prefer_read_only(
 
 
 async def _server_discover(ctx: ProbeContext) -> tuple[int, dict[str, Any] | None, str]:
-    """Call ``server/discover`` under 2026-07-28, as the audit's first probe does."""
+    """Call ``server/discover`` under 2026-07-28, as the audit's first probe does.
+
+    A probe that could not be sent returns no response body rather than raising, so
+    the caller falls back to its second route instead of the check reporting none of
+    its legs.
+    """
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "server/discover",
         "params": {"_meta": {PROTOCOL_VERSION_KEY: RC_VERSION, **_AUDIT_META}},
     }
-    return await raw_jsonrpc(
-        ctx.endpoint_url or "",
-        payload,
-        token=ctx.access_token,
-        session_id=ctx.session_id,
-        protocol_header=RC_VERSION,
-        extra_headers={"Mcp-Method": "server/discover"},
-    )
+    try:
+        return await raw_jsonrpc(
+            ctx.endpoint_url or "",
+            payload,
+            token=ctx.access_token,
+            session_id=ctx.session_id,
+            protocol_header=RC_VERSION,
+            extra_headers={"Mcp-Method": "server/discover"},
+        )
+    except Exception as exc:  # noqa: BLE001 — reported as an unreachable probe
+        ctx.errors.append(f"1.1a server/discover: {exc!r}")
+        return 0, None, f"__transport_failure__ {exc!r}"
 
 
 @register
@@ -442,8 +454,8 @@ class ProtocolVersionPinning(Check):
                     ),
                 )
             discover_note = (
-                f", after server/discover was attempted and rejected (HTTP {status}, "
-                f"code {jsonrpc_error_code(data)})"
+                f", after server/discover was attempted and returned no served set "
+                f"(HTTP {status}, code {jsonrpc_error_code(data)})"
             )
 
         sub_floor, unreached = await self._sweep(ctx)
@@ -494,6 +506,14 @@ class ProtocolVersionPinning(Check):
         A revision whose probe never completed is returned separately rather than
         dropped. Silently omitting it would let a run where the offending revision
         never answered read as compliant.
+
+        Three outcomes, and only the first two are evidence. A revision is served when
+        the echo matches. It is not served when the answer names another revision the
+        server supports instead, or refuses this one with a protocol error, because
+        either is the server deciding about the revision. Anything else -- a rate-limit
+        or gateway response, a body that is not a JSON-RPC answer, a result naming no
+        revision at all -- decided nothing and is unreached, recorded with the status
+        that came back.
         """
         served: list[str] = []
         unreached: list[str] = []
@@ -509,7 +529,7 @@ class ProtocolVersionPinning(Check):
                 },
             }
             try:
-                _status, data, _text = await raw_jsonrpc(
+                status, data, _text = await raw_jsonrpc(
                     ctx.endpoint_url or "", payload, token=ctx.access_token
                 )
             except Exception as exc:  # noqa: BLE001 — one revision failing is not fatal
@@ -517,8 +537,17 @@ class ProtocolVersionPinning(Check):
                 unreached.append(revision)
                 continue
             result = (data or {}).get("result")
-            if isinstance(result, dict) and result.get("protocolVersion") == revision:
+            echoed = result.get("protocolVersion") if isinstance(result, dict) else None
+            if echoed == revision:
                 served.append(revision)
+            elif isinstance(echoed, str) or jsonrpc_error_code(data) is not None:
+                continue  # the server named another revision, or refused this one
+            else:
+                ctx.errors.append(
+                    f"1.1a sweep {revision}: HTTP {status} carried no initialize "
+                    f"result naming a protocol revision"
+                )
+                unreached.append(revision)
         return served, unreached
 
     async def _wire_legs(self, ctx: ProbeContext) -> list[tuple[str, str, str]]:
@@ -541,10 +570,29 @@ class ProtocolVersionPinning(Check):
                 return 0, None, f"__transport_failure__ {exc!r}"
 
         if ctx.rc_supported:
-            b = await send(_tools_list(BOGUS_VERSION), protocol_header=BOGUS_VERSION)
-            c = await send(_tools_list(RC_VERSION), omit_protocol_header=True)
-            d = await send(_tools_list(), protocol_header=RC_VERSION)
-            e = await send(_tools_list(RC_VERSION), protocol_header=STALE_VERSION)
+            # From 2026-07-28 every request carries the method in a routing header, and
+            # a server enforcing that refuses a request without one using the same
+            # -32020 two of these legs test for. Sending it keeps a refusal readable as
+            # version enforcement rather than a missing routing header.
+            routing = {"Mcp-Method": "tools/list"}
+            b = await send(
+                _tools_list(BOGUS_VERSION),
+                protocol_header=BOGUS_VERSION,
+                extra_headers=routing,
+            )
+            c = await send(
+                _tools_list(RC_VERSION),
+                omit_protocol_header=True,
+                extra_headers=routing,
+            )
+            d = await send(
+                _tools_list(), protocol_header=RC_VERSION, extra_headers=routing
+            )
+            e = await send(
+                _tools_list(RC_VERSION),
+                protocol_header=STALE_VERSION,
+                extra_headers=routing,
+            )
             legs = [
                 ("1.1b", *_leg_1_1b(*b)),
                 ("1.1c", *_leg_1_1c(*c)),
@@ -860,23 +908,18 @@ class StagedCapabilityGating(Check):
             return "1.3a", "error", f"the staged probe on {staged!r} returned no JSON (HTTP {status})"
 
         code = jsonrpc_error_code(data)
-        if code == -32601:
+        # A name the server does not recognise and arguments it rejects are one
+        # outcome: the call reached no staging decision either way, so neither
+        # rejection says anything about a gate.
+        if code in (METHOD_NOT_FOUND, INVALID_PARAMS):
             return (
                 "1.3a",
                 "unknown",
                 (
-                    f"{staged!r} did not resolve as a method, so nothing was tested "
-                    f"about a staging gate"
-                ),
-            )
-        if code == INVALID_PARAMS:
-            return (
-                "1.3a",
-                "fail",
-                (
-                    f"{staged!r} resolved and was validated for arguments, so no gate "
-                    f"intercepted it before the server began handling it "
-                    f"(control: {control!r} executed cleanly)"
+                    f"{staged!r} was rejected with code {code}: the staged name did not "
+                    f"resolve, or its arguments were rejected, so nothing was tested "
+                    f"about a staging gate. Confirm {staged!r} is the name advertised "
+                    f"beyond the baseline"
                 ),
             )
         if code is not None:
@@ -934,18 +977,33 @@ class StagedCapabilityGating(Check):
         With no arguments supplied, a tool whose arguments are required answers with
         a validation error that reads exactly like a gate denial. That is why an
         unmatched rejection is UNKNOWN and why the control failing is ERROR.
+
+        A probe that could not be sent returns no response body rather than raising,
+        so one dropped connection reports an undecided leg instead of taking the whole
+        check out and reporting none of it.
         """
-        return await raw_jsonrpc(
-            ctx.endpoint_url or "",
-            {
-                "jsonrpc": "2.0",
-                "id": 9,
-                "method": "tools/call",
-                "params": {"name": tool, "arguments": arguments or {}},
-            },
-            token=ctx.access_token,
-            session_id=ctx.session_id,
+        # From 2026-07-28 a request names the method and the invoked tool in routing
+        # headers. An earlier revision defines neither, so they are sent only where
+        # that revision is negotiated and a server on an earlier one sees no change.
+        routing = (
+            {"Mcp-Method": "tools/call", "Mcp-Name": tool} if ctx.rc_supported else None
         )
+        try:
+            return await raw_jsonrpc(
+                ctx.endpoint_url or "",
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {"name": tool, "arguments": arguments or {}},
+                },
+                token=ctx.access_token,
+                session_id=ctx.session_id,
+                extra_headers=routing,
+            )
+        except Exception as exc:  # noqa: BLE001 — reported as an unreachable probe
+            ctx.errors.append(f"1.3 probe on {tool!r}: {exc!r}")
+            return 0, None, f"__transport_failure__ {exc!r}"
 
     @staticmethod
     def _text_of(result: dict[str, Any]) -> str:

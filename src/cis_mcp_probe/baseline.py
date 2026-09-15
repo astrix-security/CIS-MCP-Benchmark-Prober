@@ -143,6 +143,10 @@ def snapshot(
       to ``scopes_supported`` in the same document.
     * ``server_identity`` -- None when the server asserted no name.
     """
+    if capabilities is not None and substrate is None:
+        raise ValueError(
+            "snapshot() requires substrate when capabilities is given explicitly"
+        )
     if capabilities is None:
         caps = ctx.init_result.capabilities if ctx.init_result else None
         capabilities = caps.model_dump(exclude_none=True) if caps else {}
@@ -154,7 +158,7 @@ def snapshot(
         "endpoint": ctx.endpoint_url,
         "capability_keys": sorted(capabilities.keys()),
         "capability_leaves": capability_leaves(capabilities),
-        "capability_substrate": substrate or "initialize",
+        "capability_substrate": substrate,
         "server_identity": _identity_pair(server_info),
         "tools": sorted(t.name for t in ctx.tools),
         "resources": sorted(str(r.uri) for r in ctx.resources),
