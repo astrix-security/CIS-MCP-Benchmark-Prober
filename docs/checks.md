@@ -414,15 +414,25 @@ clients are cached under a scratch key of their own, never the key holding the
 working token: a registration written over that key invalidates the cached token
 and forces a fresh interactive login.
 
-Check 3.3.1's `3.3.1b` leg spends the cached refresh token, so it runs as the last
-credential operation of the run. An authorization server that rotates refresh
-tokens on use replaces the cached one during that request, and the pair it returns
-is bound to a resource the audited server does not serve. The probe never caches
-that pair. Instead it spends the rotated token on one further refresh naming the
-audited resource, and caches that response, so the stored credential is bound to
-the right resource by construction. The leg states in its evidence whether the
-restore succeeded. Without it, every run would end with a spent refresh token and
-the next run would need an interactive login.
+Check 3.3.1's `3.3.1b` leg spends the cached refresh token, so it runs at the end of
+a run, after every check that needs a working credential. What follows depends on the
+authorization server.
+
+Where the server mints the token, it also returns a rotated refresh token, and the
+pair is bound to a resource the audited server does not serve. The probe never caches
+that pair. It spends the rotated token on one further refresh naming the audited
+resource and caches that response, so the stored credential is bound to the right
+resource by construction. The leg states in its evidence whether that restore
+succeeded.
+
+Where the server refuses to mint, the request may still have consumed the token:
+some servers redeem it before they read the resource parameter, and return no
+replacement alongside the error. So the probe discards the cached refresh token
+whatever the answer was, rather than leaving it for the next run to present a second
+time. A server that detects a reused refresh token revokes the whole token family,
+the access token with it, and a run that lost its credential that way reports a
+refusal for every check still to come. The next run against such a server needs an
+interactive login, and the leg's evidence says so.
 
 ### 3.1.2 OIDC/OAuth 2.1 or short-lived API tokens are used for remote servers
 

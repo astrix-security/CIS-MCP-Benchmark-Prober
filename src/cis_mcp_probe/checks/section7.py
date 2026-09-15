@@ -455,10 +455,13 @@ def _wrong_audience_outcome(
 class WrongAudienceRejected(Check):
     """7.2.1, Assessment Status: Automated.
 
-    Defined last in this file on purpose. It presents a token minted for another
-    resource, and obtaining that token spends a refresh grant, so no check
-    registered after it may rely on the cached credential.
+    Runs last of every check, through ``run_last``. It presents a token minted for
+    another resource, and check 3.3.1 spent a refresh grant to obtain that token, so
+    no check after either of them may rely on the cached credential.
     """
+
+    # Reads the credential last of all. See the class docstring.
+    run_last = 30
 
     id = "7.2.1"
     title = "Alerts are generated on audience and issuer validation failures"

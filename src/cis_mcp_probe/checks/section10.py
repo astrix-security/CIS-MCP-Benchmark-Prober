@@ -693,6 +693,11 @@ class CachePolicy(Check):
 
 @register
 class RequestBodyLimit(Check):
+    # Leg 10.2a sends a body padded past the probe size. A body large enough to trip
+    # a rate limiter or a WAF must not precede another check's requests, so this
+    # check runs after every check that needs an ordinary connection.
+    run_last = 10
+
     id = "10.2"
     title = (
         "Request and response body size limits, token budgets, and per-principal "

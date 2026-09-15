@@ -97,6 +97,12 @@ class Check:
     rationale: str = ""
     remediation: str = ""
 
+    # A check that leaves the credential or the connection worse for the checks after
+    # it sorts to the end. Higher runs later; equal values keep registration order.
+    # Import order cannot express this, because such checks live in different section
+    # modules and each module's own order is meaningful on its own.
+    run_last: int = 0
+
     async def run(self, ctx: ProbeContext) -> CheckResult:  # pragma: no cover
         raise NotImplementedError
 
@@ -142,4 +148,10 @@ def register(check_cls: type[Check]) -> type[Check]:
 
 
 def all_checks() -> list[Check]:
-    return list(_REGISTRY)
+    """Every registered check, in the order a run must execute them.
+
+    Registration order, then ``run_last`` for the few checks that must follow it.
+    The sort is stable, so a check leaving ``run_last`` at 0 keeps the position its
+    module's import gave it.
+    """
+    return sorted(_REGISTRY, key=lambda check: check.run_last)
