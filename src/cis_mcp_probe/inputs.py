@@ -1,11 +1,13 @@
-"""Operator-supplied per-domain inputs for legs 1.3a, 3.3.1c and 3.3.4e.
+"""Operator-supplied per-domain inputs for legs 1.3a, 3.3.1c, 3.3.4e, 5.1.1d and 5.4.1a.
 
-Each needs something no black-box probe can derive: a downstream resource API to
-present our token to, a tool to call for a scope-enforcement probe, and arguments
-valid for a tool this probe invokes. The file is optional. A check with no entry
-records ``unknown`` for that leg rather than being gated on the file, except leg
-1.3a: its control probe must execute cleanly, so a control tool that requires
-arguments and has none supplied makes that leg record an error instead.
+Each leg needs something no black-box probe can derive: a downstream resource API to
+present our token to, a tool to call for a scope-enforcement probe, arguments valid for
+a tool this probe invokes, a tool to call with schema-violating arguments, and a resource
+URI that reads successfully so a traversal denial can be attributed. The file is
+optional, and a check with no entry records ``unknown`` for that leg rather than being
+gated on the file. Two legs read differently, and the notice says so where it names
+them: 1.3a records an error when its control tool needs arguments nobody supplied, and
+5.4.1a still sends a traversal probe against a control it derived itself.
 
 Keyed by the domain the operator typed, not by endpoint URL, because
 ``_detect_endpoint`` has not run when this is read. That is why the shape differs
@@ -17,6 +19,9 @@ Shape of ``~/.cis-mcp-probe/probe-inputs.json``:
         "scope_probe_tool": "<name>",
         "scope_probe_arguments": {},
         "tool_arguments": {"<name>": {"<arg>": "<value>"}},
+        "schema_probe_tool": "<name>",
+        "schema_probe_arguments": {},
+        "traversal_control_uri": "<uri>",
         "downstream_endpoints": ["https://api.example.com/me"] } }
 
 ``scope_probe_tool`` and ``tool_arguments`` are not interchangeable, and confusing
@@ -25,6 +30,10 @@ outside the token's grant, and leg 3.3.4e fails when it executes. ``tool_argumen
 asserts nothing about authorization: it supplies arguments for a tool leg 1.3a chose
 itself, so that a tool which needs arguments can be invoked at all. Leg 1.3a's control
 probe must execute cleanly, which is the opposite of what 3.3.4e wants.
+
+``schema_probe_arguments`` is required alongside ``schema_probe_tool``: leg 5.1.1d
+removes one property from the operator's own argument object and never invents the
+rest, so a tool named without arguments cannot be probed.
 """
 
 from __future__ import annotations
@@ -94,9 +103,30 @@ def missing_input_notice(domain: str, entry: dict) -> str | None:
             "1.3a (no tool_arguments) will record an error, not unknown, if the "
             "tool it picks as a control requires arguments"
         )
-    if not missing:
+    if not entry.get("schema_probe_tool"):
+        missing.append("5.1.1d (no schema_probe_tool) will record unknown")
+    elif not entry.get("schema_probe_arguments"):
+        # A tool with no argument object cannot be probed: the leg removes one
+        # property from what the operator supplied, and never invents the rest.
+        missing.append("5.1.1d (no schema_probe_arguments) will record unknown")
+    if not entry.get("traversal_control_uri"):
+        # Not "will record unknown": 5.4.1a falls back to the first advertised
+        # resource and still sends a traversal probe. The notice is what an operator
+        # actually reads before authorising a run against a third party.
+        traversal_note = (
+            "5.4.1a (no traversal_control_uri) will derive its control from the first "
+            "advertised resource and still send a traversal probe"
+        )
+    else:
+        traversal_note = ""
+    if not missing and not traversal_note:
         return None
+    parts = []
+    if missing:
+        parts.append("; ".join(missing))
+    if traversal_note:
+        parts.append(traversal_note)
     return (
         f"probe-inputs.json has no entry (or an incomplete one) for {domain!r}: "
-        f"{'; '.join(missing)}. See {PATH}."
+        f"{'. '.join(parts)}. See {PATH}."
     )
