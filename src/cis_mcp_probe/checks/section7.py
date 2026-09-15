@@ -1,6 +1,6 @@
 """Section 7 checks (observability and audit), implemented as live probes.
 
-Tracks the Section 7 revision dated 2026-09-01.
+Tracks Section 7 as published in CIS MCP Server Benchmark v1.0.0.
 
 Scope reasoning — what a black-box client can and cannot decide:
 
@@ -284,8 +284,8 @@ def _progress_token_outcome(
     A token belonging to another check's call is correct, not a mismatch, which is
     why the comparison is against the whole set rather than one value.
     """
-    if not channel:
-        return ("unknown", NO_CHANNEL)
+    if not notifications:
+        return ("unknown", NO_CHANNEL if not channel else "no notification arrived")
     if not sent:
         return (
             "unknown",
@@ -485,12 +485,14 @@ class WrongAudienceRejected(Check):
                     ctx.endpoint_url,
                     payload,
                     token=ctx.access_token,
+                    session_id=ctx.session_id,
                     protocol_header=ctx.negotiated_version,
                 )
                 probe_status, _b, _t = await raw_jsonrpc(
                     ctx.endpoint_url,
                     payload,
                     token=token,
+                    session_id=ctx.session_id,
                     protocol_header=ctx.negotiated_version,
                 )
             except Exception as e:  # noqa: BLE001

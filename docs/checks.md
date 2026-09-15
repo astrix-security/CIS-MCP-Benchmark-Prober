@@ -1406,11 +1406,10 @@ minted a token for another resource, and it then refused that token with `401` w
 accepting the valid one. Everywhere else the authorization server declined to mint one,
 which is itself the conforming answer, so the leg is undecided.
 
-**7.2.2 has no live coverage.** Only DeepWiki opens a server-to-client notification
-stream at all; Linear answers `GET` with `405` and `Allow: POST, DELETE, OPTIONS`, and
-the other three open none either. No target sent a notification during a run, so
-neither leg had anything to read. The progress leg additionally needs an operator input
-naming a tool for the scope probe to call, and no target has one.
+**7.2.2 has no live coverage.** DeepWiki opens a server-to-client notification
+stream. No target sent a notification during a run, so neither leg had anything to
+read. The progress leg additionally needs an operator input naming a tool for the
+scope probe to call, and no target has one.
 
 **One limitation worth naming.** The access token is snapshotted onto the context when
 the session starts, and the SDK's OAuth provider may refresh it mid-run. A later raw

@@ -430,6 +430,10 @@ async def _observe_notification_channel(ctx: ProbeContext, endpoint: str) -> Non
     headers = {"Accept": "text/event-stream"}
     if ctx.negotiated_version:
         headers["MCP-Protocol-Version"] = ctx.negotiated_version
+    if ctx.access_token:
+        headers["Authorization"] = f"Bearer {ctx.access_token}"
+    if ctx.session_id:
+        headers["Mcp-Session-Id"] = ctx.session_id
     try:
         async with httpx.AsyncClient(
             timeout=10.0, follow_redirects=False, verify=verify_context()
