@@ -25,18 +25,34 @@ from .netguard import is_safe_fetch_host, parts_of, verify_context
 
 
 def _extract_json(resp: httpx.Response) -> dict[str, Any] | None:
-    """Return the JSON-RPC object from a response body, JSON or SSE-framed."""
+    """Return the JSON-RPC object from a response body, JSON or SSE-framed.
+
+    On an SSE stream, prefer a frame carrying an ``id``. A response to a request
+    carries one and a notification does not, so a server that emits a notification
+    before its answer would otherwise hand the caller the notification. A check
+    reading that frame finds no ``error`` in it and concludes the request was
+    accepted, which inverts the verdict on a server that rejected it correctly.
+
+    A stream carrying no frame with an ``id`` falls back to the first parseable
+    frame, so a server that answers without one is still read rather than reported
+    as unparseable.
+    """
     ctype = resp.headers.get("content-type", "")
     if "text/event-stream" in ctype:
+        first: dict[str, Any] | None = None
         for line in resp.text.splitlines():
             line = line.strip()
-            if line.startswith("data:"):
-                fragment = line[len("data:") :].strip()
-                try:
-                    return json.loads(fragment)
-                except json.JSONDecodeError:
-                    continue
-        return None
+            if not line.startswith("data:"):
+                continue
+            try:
+                frame = json.loads(line[len("data:") :].strip())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(frame, dict) and "id" in frame:
+                return frame
+            if first is None:
+                first = frame
+        return first
     try:
         return resp.json()
     except (json.JSONDecodeError, ValueError):

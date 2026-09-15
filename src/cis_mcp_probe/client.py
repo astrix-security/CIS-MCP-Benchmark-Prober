@@ -672,8 +672,9 @@ async def _session_attempt(
     )
 
     async def collect_notification(message: object) -> None:
-        # The SDK's read task calls this for every inbound message; we keep the
-        # server notifications (e.g. listChanged) so check 1.3 can react to them.
+        # The SDK's read task calls this for every inbound message; we record
+        # each server notification (e.g. listChanged) on the context so a check
+        # can inspect what the server sent during the session.
         if isinstance(message, types.ServerNotification):
             ctx.notifications.append(message.root)
 
