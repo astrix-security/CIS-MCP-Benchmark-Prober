@@ -32,9 +32,15 @@ class Status(str, Enum):
       server does not support it.
     * PASS - the server passes the check.
     * FAIL - the server does not pass the check.
-    * UNKNOWN - this run cannot decide, a later run may.
-    * ERROR - a critical failure on our side means the check cannot be
-      determined.
+    * UNKNOWN - the run made the observation the check needs, and the
+      observation does not decide: nothing recorded to compare against, an
+      operator input nobody supplied, or a refusal whose stated reason answers
+      a different question. A later run may decide.
+    * ERROR - the observation the check needs was never made. Either the probe
+      itself could not run, or the response cannot be attributed to the audited
+      server: a bare status with no protocol error body is served the same way
+      by a gateway in front of it, and a control probe that did not succeed
+      leaves the probe's own answer unreadable.
 
     Do not add verdicts or blur these boundaries.
     """
