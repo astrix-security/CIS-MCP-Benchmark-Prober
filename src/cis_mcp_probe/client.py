@@ -413,11 +413,66 @@ async def _fetch_oauth_metadata(
         ctx.errors.append(f"oauth discovery: {e!r}")
 
 
+async def _observe_notification_channel(ctx: ProbeContext, endpoint: str) -> None:
+    """Record whether the server opens a stream it can push notifications down.
+
+    A GET asking for ``text/event-stream`` either yields one or it does not. Without
+    this, an empty notification list is ambiguous: the server may have sent nothing,
+    or we may never have listened, and only the first says anything about the server.
+
+    The body is never read. An open stream does not end, so consuming it would block
+    for the stream's lifetime and lose the status that is the whole observation.
+
+    Call this only once a token is held. An OAuth server answers an unauthenticated
+    GET with 401, which says nothing about whether it offers a stream, and recording
+    that as "no stream" would blame the server for a credential we never sent.
+    """
+    headers = {"Accept": "text/event-stream"}
+    if ctx.negotiated_version:
+        headers["MCP-Protocol-Version"] = ctx.negotiated_version
+    if ctx.access_token:
+        headers["Authorization"] = f"Bearer {ctx.access_token}"
+    if ctx.session_id:
+        headers["Mcp-Session-Id"] = ctx.session_id
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0, follow_redirects=False, verify=verify_context()
+        ) as client:
+            async with client.stream("GET", endpoint, headers=headers) as resp:
+                content_type = resp.headers.get("content-type", "")
+                ctx.notification_channel = resp.status_code == 200 and (
+                    "text/event-stream" in content_type
+                )
+                ctx.http["notify:stream"] = HttpObservation(
+                    url=endpoint,
+                    method="GET",
+                    status=resp.status_code,
+                    headers={"content-type": content_type},
+                )
+    except Exception as e:  # noqa: BLE001
+        ctx.http["notify:stream"] = HttpObservation(
+            url=endpoint, method="GET", error=repr(e)
+        )
+
+
+def _record_result_meta(ctx: ProbeContext, method: str, result: object) -> None:
+    """Keep the ``_meta`` envelope a result carried, under the method that produced it.
+
+    Every result inherits an optional ``_meta`` from the SDK's ``Result`` base class.
+    An absent envelope and an empty one are recorded the same way, as an empty dict,
+    because a reader cannot act on the difference: both mean the result named nothing.
+    """
+    meta = getattr(result, "meta", None)
+    ctx.result_meta[method] = dict(meta) if isinstance(meta, dict) else {}
+
+
 async def _enumerate(ctx: ProbeContext, session: ClientSession) -> None:
     caps = ctx.init_result.capabilities if ctx.init_result else None
     if caps and caps.tools is not None:
         try:
-            ctx.tools = (await session.list_tools()).tools
+            result = await session.list_tools()
+            ctx.tools = result.tools
+            _record_result_meta(ctx, "tools/list", result)
         except Exception as e:  # noqa: BLE001
             ctx.errors.append(f"list_tools: {e!r}")
     if caps and caps.resources is not None:
@@ -652,6 +707,10 @@ def _reset_session_state(ctx: ProbeContext) -> None:
     ctx.token_scope = None
     ctx.negotiated_version = None
     ctx.notifications.clear()
+    ctx.notification_channel = False
+    ctx.result_meta.clear()
+    ctx.progress_tokens_sent.clear()
+    ctx.foreign_audience_token = None
 
 
 async def _session_attempt(
@@ -694,6 +753,7 @@ async def _session_attempt(
             ) as session:
                 ctx.session = session
                 ctx.init_result = await session.initialize()
+                _record_result_meta(ctx, "initialize", ctx.init_result)
                 ctx.authenticated = auth_required
                 ctx.negotiated_version = ctx.init_result.protocolVersion
                 try:
@@ -705,6 +765,7 @@ async def _session_attempt(
                     ctx.access_token = tokens.access_token
                     ctx.token_expires_in = tokens.expires_in
                     ctx.token_scope = tokens.scope
+                await _observe_notification_channel(ctx, endpoint)
                 await _enumerate(ctx, session)
                 await _detect_rc_support(ctx)
                 return await _run_checks(ctx, checks)

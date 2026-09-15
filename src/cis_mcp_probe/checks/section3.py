@@ -916,8 +916,15 @@ class ScopeMinimization(Check):
             )
         if ctx.session is None:
             return "error", f"no live session to call {tool!r} with"
+        # Ask this one call to echo a progressToken we choose. It rides on a call
+        # that happens anyway, and a later check compares the token against what
+        # any progress notification carries. It changes nothing about this check.
+        progress_token = f"cis-probe-progress-{ctx.domain}"
+        ctx.progress_tokens_sent.add(progress_token)
         try:
-            result = await ctx.session.call_tool(tool, arguments)
+            result = await ctx.session.call_tool(
+                tool, arguments, meta={"progressToken": progress_token}
+            )
         except Exception as exc:  # noqa: BLE001 — a refusal arrives as an exception
             return _classify_refusal(tool, repr(exc))
         if getattr(result, "isError", False):
@@ -2107,6 +2114,7 @@ def _rotated_refresh(body: str, spent: str) -> str | None:
 
 
 async def _restore_refresh_chain(
+    ctx: ProbeContext,
     store: FileTokenStorage,
     token_endpoint: str,
     form: dict[str, str],
@@ -2119,6 +2127,11 @@ async def _restore_refresh_chain(
     bound to a resource the audited server does not serve, so neither caching that
     pair nor caching nothing is right. Returns the sentence the leg appends to its
     evidence; a failure here is not a verdict.
+
+    The renewed access token also replaces the one on the context. An issuer that
+    rotates on refresh may invalidate the token this run started with, and every
+    later check still reads ``ctx.access_token``: leaving the old value there sends
+    them all at a credential the server has already retired.
     """
     status, _, text, error = await raw_post_form(
         token_endpoint, dict(form, refresh_token=refresh, resource=resource)
@@ -2137,6 +2150,8 @@ async def _restore_refresh_chain(
             "run needs a fresh login"
         )
     await store.set_tokens(renewed)
+    if renewed.access_token:
+        ctx.access_token = renewed.access_token
     return (
         f"the refresh chain was restored for {resource}, so the cached credential "
         "survives this leg"
@@ -2405,12 +2420,18 @@ class AudienceBinding(Check):
                 "untested",
             )
 
+        # Keep the token for any later check that needs one bound elsewhere. A
+        # refresh grant can rotate the cached refresh token, so the run asks for
+        # exactly one such token and every reader shares it.
+        ctx.foreign_audience_token = minted
+
         # The request above spent the cached refresh token, and a server that
         # rotates has just replaced it. Re-establish the chain for the audited
         # resource before anything else, or the next run has no way to refresh.
         rotated = _rotated_refresh(text, refresh)
         if rotated:
             restored = await _restore_refresh_chain(
+                ctx,
                 store,
                 token_endpoint,
                 form,
