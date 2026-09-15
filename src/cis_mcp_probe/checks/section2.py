@@ -604,6 +604,21 @@ class OriginValidated(Check):
                 **details,
             )
 
+        # The allowed-Origin leg is this check's control, and past this point every
+        # branch reads the hostile leg as a statement about Origin. Where the control
+        # was refused too, no leg says anything about Origin: a server that requires
+        # a credential the run does not hold answers every Origin with the same 401,
+        # and reading that as a hostile-Origin refusal would assert non-compliance
+        # from three identical refusals.
+        if not 200 <= good_status < 400:
+            return self._unknown(
+                base + f"; the stand-in allowed Origin was itself refused with "
+                f"{good_status}, so the hostile leg's {evil_status} is not "
+                f"attributable to Origin validation. Re-run with a credential the "
+                f"server accepts, or with its real allowlisted Origin",
+                **details,
+            )
+
         if is_rejection(evil_status, evil_data):
             return self._fail(
                 base + f"; hostile Origin refused with {evil_status} rather than "

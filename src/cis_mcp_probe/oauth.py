@@ -15,6 +15,8 @@ The loopback port is chosen up front so the caller can register a matching
 
 from __future__ import annotations
 
+import os
+import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -81,11 +83,28 @@ class LoopbackCallbackServer:
         return f"http://{self.host}:{self.port}/callback"
 
     async def redirect_handler(self, authorization_url: str) -> None:
-        print(f"\n  Opening browser for authentication:\n    {authorization_url}\n")
+        # stderr, not stdout: with --json, stdout carries the report and nothing
+        # else, and a reader piping it to a file needs it to parse.
+        print(
+            f"\n  Opening browser for authentication:\n    {authorization_url}\n",
+            file=sys.stderr,
+        )
+        # The browser runs as a child process and inherits this process's stdout,
+        # where some browsers announce themselves -- Chrome prints "Opening in
+        # existing browser session." So fd 1 points at stderr for the launch, and
+        # anything the child says lands beside our own messages.
+        saved_stdout = os.dup(1)
+        os.dup2(2, 1)
         try:
             webbrowser.open(authorization_url)
         except Exception:  # noqa: BLE001 — headless boxes: URL is printed above
-            print("  (could not auto-open a browser — paste the URL above)")
+            print(
+                "  (could not auto-open a browser — paste the URL above)",
+                file=sys.stderr,
+            )
+        finally:
+            os.dup2(saved_stdout, 1)
+            os.close(saved_stdout)
 
     async def callback_handler(self) -> tuple[str, str | None]:
         """Block (off the event loop) until the redirect arrives; return (code, state)."""
