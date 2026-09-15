@@ -240,6 +240,7 @@ async def raw_endpoint_request(
     *,
     extra_headers: dict[str, str] | None = None,
     token: str | None = None,
+    content: bytes | None = None,
     timeout: float = 8.0,
 ) -> tuple[int | None, dict[str, str], str, str | None]:
     """Send ``method`` to the MCP endpoint itself and return its status and headers.
@@ -249,6 +250,16 @@ async def raw_endpoint_request(
     The host guard is not consulted, and that is the guard's scope rather than an
     exception to it: the guard covers URLs outside the endpoint's own origin, and
     ``raw_jsonrpc`` already skips it for the same reason.
+
+    Redirects are not followed. A caller sending ``content`` would otherwise have
+    httpx re-send the whole body to a location the *server* chose, past the guard.
+    ``raw_jsonrpc`` and ``raw_jsonrpc_headers`` both follow redirects because they
+    post to the endpoint the probe was pointed at; a body large enough to test a
+    size limit is a different risk.
+
+    ``content`` is pre-serialized bytes, so a caller can measure exactly what it
+    sends. A dict handed to httpx is serialized out of the caller's sight and its
+    length cannot be asserted.
 
     The response body is never read, and the returned text is always empty. A
     standalone GET against a server that still serves the legacy stream answers with
@@ -264,7 +275,9 @@ async def raw_endpoint_request(
     try:
         async with httpx.AsyncClient(
             follow_redirects=False, timeout=timeout, verify=verify_context()
-        ) as client, client.stream(method, endpoint, headers=headers) as resp:
+        ) as client, client.stream(
+            method, endpoint, headers=headers, content=content
+        ) as resp:
             return (
                 resp.status_code,
                 {k.lower(): v for k, v in resp.headers.items()},
