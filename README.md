@@ -1,53 +1,141 @@
 # cis-mcp-probe
 
-A validation tool for the **CIS MCP Security Benchmark**. It connects to a live
-MCP server the way a real client would — by domain, over Streamable HTTP, doing
-OAuth if required — and evaluates it against the benchmark's checks. The output
-is **check-centric**: for each check, which servers pass, fail, or can't be
-decided.
+A command-line tool that grades a live MCP server against the recommendations in
+the **CIS MCP Server Benchmark**.
+
+It connects the way an ordinary client would — by domain, over Streamable HTTP,
+completing OAuth where the server requires it — and then evaluates what it can
+observe from outside. The report is check-centric: for each recommendation, which
+servers pass, which fail, and which the run could not decide.
+
+The tool is an **external, black-box probe**. It sees only what any client
+connecting to that domain sees, so a recommendation whose evidence lives in an
+audit log, an enterprise registry or a host process inventory is reduced to its
+externally observable part, or reported rather than graded. Every check states its
+own reduction in the evidence it prints, so a report never implies coverage it did
+not achieve.
 
 ## Why this exists
 
-We're co-authoring a CIS Benchmark for MCP security. Before a recommendation
-ships, we want to know whether it is sound and realistic against real servers.
-This tool runs each check against actual hosted MCP servers (Notion, Sentry,
-Stripe, Linear, DeepWiki, …) so we can see, empirically, how the ecosystem
-measures up — and catch checks that no real server can pass, or that don't apply
-as written.
+A recommendation is only worth relying on once a real server has been measured
+against it. This tool runs each check against live hosted MCP servers — DeepWiki,
+Linear, Sentry, Notion and Stripe — so the results are empirical: which
+recommendations hold up in the field, which no server passes as written, and which
+cannot be decided from outside at all.
 
-It is deliberately an **external, black-box probe**: it sees only what any client
-connecting to the server by domain can see. That scopes which checks it can
-decide automatically — see [Scope & limitations](#scope--limitations).
+## What it evaluates
 
-## What it does
+36 checks across six of the benchmark's ten sections. "Verdict" says where the
+answer comes from: `wire` decides from what the server sent, `in part` decides one
+half of the recommendation and names the half it cannot reach, and `reported only`
+means the recommendation is operator-side and the run records what it observed
+instead of grading it.
 
-- Connects to an MCP server by domain over Streamable HTTP, performs the
-  `initialize` handshake, and enumerates tools / resources / prompts /
-  capabilities.
-- Handles interactive **OAuth 2.1** (PKCE + dynamic client registration): opens
-  the browser, catches the redirect on a loopback port, and caches + refreshes
-  tokens so repeat runs don't prompt again.
-- Prefers protocol revision **2026-07-28** and falls back to **2025-11-25** when
-  a server won't speak the newer one.
-- Runs the Section 1 checks and prints a per-check report across all servers, as
-  text or JSON.
+### 1 — Governance & Versioning
 
-## Checks implemented
+| Check | Level | What it looks at | Verdict |
+|---|---|---|---|
+| 1.1 | L1 | Whether the server serves only approved protocol revisions, and refuses a request whose version is absent, unapproved or stated inconsistently | wire |
+| 1.2 | L1 | Whether the advertised capability configuration still matches a recorded baseline, value by value | wire |
+| 1.3 | L2 | Whether a capability advertised beyond the baseline is refused until it is re-approved | in part |
+| 1.4 | L1 | Whether the server's name and version match the identity recorded for it | wire |
 
-| Check | Level | What the probe does |
-|-------|-------|---------------------|
-| 1.1 | L1 | Sends a bogus and an absent protocol version and confirms both are rejected. Uses the `MCP-Protocol-Version` header for 2025-11-25 servers and per-request `_meta` for 2026-07-28. (The benchmark's log-inspection half is out of scope for a black-box probe.) |
-| 1.2 | L1 | Compares advertised capabilities and tool/resource/prompt names against a baseline we record ourselves per server URL. New items are flagged as drift. Capture/refresh with `--update-baseline`. |
-| 1.3 | L2 | Waits briefly for a `listChanged` event, then tries to invoke the newly added tool. Reports UNKNOWN if no event arrives in time. |
-| 1.4 | L1 | Confirms the server exposes non-empty `serverInfo` (name/version). |
-| 2.1 | L1 | Reports N/A: the audit is a host-side transport inventory plus a registry lookup, and a server reached by domain is a network transport by definition. |
-| 2.2 | L1 | Confirms plaintext HTTP isn't served, that TLS 1.0/1.1 are refused while 1.2+ is accepted, and that the certificate is currently valid. |
-| 2.3 | L2 | Confirms an unauthenticated request is refused and the same request with a credential is accepted with an SSE-framed response. Per-hop forwarding is not verified and is stated as a caveat. |
-| 2.4 | L1 | Confirms a request missing `Mcp-Method` is rejected, and that a header/body mismatch is rejected with `-32020`. 2026-07-28 only, so reports NO-REV against older servers. |
-| 2.5 | L1 | Sends a hostile `Origin` with no preceding `OPTIONS` and confirms it's refused with 403. |
+### 2 — Transport & Connectivity
 
-See [docs/checks.md](docs/checks.md) for what each check requires, how it's
-implemented, and what was reduced to fit a black-box probe.
+| Check | Level | What it looks at | Verdict |
+|---|---|---|---|
+| 2.1 | L1 | Whether a local single-user server uses stdio rather than a network transport | reported only |
+| 2.2 | L1 | Whether TLS is required, plaintext refused, obsolete TLS versions refused, and the certificate valid | wire |
+| 2.3 | L2 | Whether authentication is enforced before a streamed response is established | wire |
+| 2.4 | L1 | Whether the required request metadata headers are present and agree with the body | wire |
+| 2.5 | L1 | Whether a request carrying a hostile `Origin` is refused | wire |
+
+### 3 — Authentication & Authorization
+
+| Check | Level | What it looks at | Verdict |
+|---|---|---|---|
+| 3.1.1 | L1 | Where a stdio server reads its credentials from | reported only |
+| 3.1.2 | L1 | Whether the server requires OAuth or a short-lived token, and how long an issued token lives | wire |
+| 3.2.1 | L2 | Whether authorization is enforced per tool | reported only |
+| 3.2.2 | L1 | Whether the server passes our credential through to a downstream API | in part |
+| 3.2.3 | L1 | Whether server-supplied tool annotations drive authorization or human-approval decisions | reported only |
+| 3.3.1 | L1 | Whether the token is bound to this server as its audience | in part |
+| 3.3.2 | L2 | Whether OAuth discovery metadata is served over TLS and names an approved authorization server | wire |
+| 3.3.3 | L2 | Whether one downstream service-account identity is shared across tools or servers | reported only |
+| 3.3.4 | L2 | Whether the granted scopes are minimal, free of wildcards, and within the recorded baseline | wire |
+| 3.3.5 | L2 | Whether a static OAuth client id carries confused-deputy safeguards | in part |
+
+### 5 — Server Configuration
+
+| Check | Level | What it looks at | Verdict |
+|---|---|---|---|
+| 5.1.1 | L1 | Whether every advertised tool schema compiles under the JSON Schema dialect it declares | wire |
+| 5.1.2 | L1 | Whether resource templates declare a URI pattern and a MIME type, and a non-existent read is refused | wire |
+| 5.1.3 | L1 | Whether prompts declare well-formed arguments, and a call missing a required one is refused | wire |
+| 5.2.1 | L2 | Whether `listChanged` notifications are rate-limited | reported only |
+| 5.2.2 | L1 | Whether a session handle is used as authentication | reported only |
+| 5.2.3 | L1 | Whether the legacy session and stream-resumption surface is gone | wire |
+| 5.3.1 | L1 | Whether logs are kept out of the protocol stream in stdio mode | reported only |
+| 5.4.1 | L1 | Whether a resource read that escapes the approved root is denied | wire |
+| 5.5.1 | L2 | Whether authorization, scope and expiry are enforced on Tasks | reported only |
+| 5.6.1 | L2 | Whether a side-effecting tool call requires an idempotency key | reported only |
+
+### 7 — Observability & Audit
+
+| Check | Level | What it looks at | Verdict |
+|---|---|---|---|
+| 7.1.1 | L1 | Whether lifecycle and invocation metadata is recorded | reported only |
+| 7.1.2 | L1 | Whether a JSON-RPC request carrying a null id is refused | wire |
+| 7.1.3 | L1 | Whether audit records carry accurate, non-decreasing timestamps | reported only |
+| 7.2.1 | L1 | Whether a deliberately mis-scoped token is refused | in part |
+| 7.2.2 | L2 | Whether server notifications name their sender and echo a token the run sent | in part |
+
+### 10 — Resource Limits & Caching
+
+| Check | Level | What it looks at | Verdict |
+|---|---|---|---|
+| 10.1 | L1 | Whether cache directives keep static content revalidated and per-user content out of shared caches | wire |
+| 10.2 | L1 | Whether a request body above the configured limit is refused | wire |
+
+### Sections with no checks here
+
+Four sections were read and none of their recommendations is decidable from a client
+connection.
+
+- **4 — Client (Host) Configuration.** All ten recommendations audit the host or the
+  client, never the server.
+- **6 — Data Protection & Privacy.** A secret scan over the deployment's own
+  manifests and filesystem, the resolver and outbound-proxy configuration on the
+  path, and what a host chooses to send to the model.
+- **8 — Supply Chain Security.** The allowlist and vetting records a host enforces,
+  the content hash an installed artefact is pinned to, and the package source the
+  production host resolves against.
+- **9 — Isolation & Execution Safety.** The container, VM or kernel-level sandbox a
+  server process runs inside, its least-privilege identity, and the gateway in front
+  of it.
+
+## Verdicts
+
+| Verdict | Meaning |
+|---|---|
+| `PASS` | The server satisfied the part of the recommendation this probe can observe. |
+| `FAIL` | It did not. |
+| `UNKNOWN` | The run made the observation and it does not decide: no baseline recorded yet, an operator input nobody supplied, or a refusal whose reason answers a different question. A later run may decide. |
+| `ERROR` | The observation was never made. The probe could not run, or the response cannot be attributed to the server. A bare status with no protocol error body is served the same way by a gateway in front of it. |
+| `N/A` | The whole recommendation is operator-side and no check of our own is defined for it. |
+| `NO-REV` | The check tests a mechanism that exists only in a protocol revision this server does not speak. Re-running cannot change it; only the server adopting the revision can. |
+
+## How it connects
+
+- Connects by domain over Streamable HTTP, completes the `initialize` handshake,
+  and enumerates tools, resources, templates, prompts and capabilities.
+- Handles interactive OAuth 2.1 with PKCE and dynamic client registration: opens a
+  browser, catches the redirect on a loopback port, then caches and refreshes the
+  tokens so a repeat run does not prompt.
+- Prefers the newest protocol revision it knows and falls back when a server will
+  not speak it.
+- Records a per-server baseline for the checks that compare against one. Capture
+  or refresh it with `--update-baseline`.
 
 ## Install
 
@@ -58,90 +146,117 @@ uv sync
 ## Usage
 
 ```
-uv run cis-mcp-probe mcp.notion.com                    # one server
-uv run cis-mcp-probe mcp.sentry.dev mcp.stripe.com     # several at once
-uv run cis-mcp-probe mcp.notion.com --update-baseline  # record/refresh baseline (run first for 1.2)
-uv run cis-mcp-probe --json mcp.notion.com             # machine-readable, for a marketplace
-uv run cis-mcp-probe mcp.notion.com --info             # connect + enumerate only, no checks
-uv run cis-mcp-probe mcp.notion.com --reauth           # discard cached credentials and log in again
+uv run cis-mcp-probe mcp.deepwiki.com                       # one server
+uv run cis-mcp-probe mcp.linear.app mcp.sentry.dev          # several at once
+uv run cis-mcp-probe mcp.notion.com --update-baseline       # record or refresh the baseline; run this first
+uv run cis-mcp-probe mcp.deepwiki.com --json                # machine-readable report on stdout
+uv run cis-mcp-probe mcp.stripe.com --info                  # connect and enumerate only, no checks
+uv run cis-mcp-probe mcp.stripe.com --reauth                # discard cached credentials and log in again
 ```
 
-For OAuth servers a browser opens per server; complete the login and the probe
-continues. Tokens and baselines cache under `~/.cis-mcp-probe/`.
+Checks 1.2, 1.4 and 3.3.4 compare against a baseline, so they report `UNKNOWN` on
+a first run and decide on the second. Tokens and baselines cache under
+`~/.cis-mcp-probe/`. Some checks need an operator input that no probe can derive:
+a downstream API to present the token to, a tool to call for a scope probe, a
+static resource path. Those live in `~/.cis-mcp-probe/probe-inputs.json`, and a run
+prints which checks are affected when an entry is missing.
 
 ## Example output
 
 ```
 ========================================================================
-Targets probed: 4
+Targets probed: 1
 ========================================================================
-  mcp.deepwiki.com   ok   DeepWiki 2.14.3    [auth=False, proto=2025-11-25, no-RC]
-  mcp.sentry.dev     ok   Sentry MCP 0.37.0  [auth=True,  proto=2025-11-25, no-RC]
-  mcp.stripe.com     ok   stripe-mcp 1.0.0   [auth=True,  proto=2025-03-26, no-RC]
-  mcp.linear.app     ok   Linear MCP 1.0.0   [auth=True,  proto=2025-11-25, no-RC]
+  mcp.deepwiki.com             ok          DeepWiki 2.14.3  [auth=False, proto=2025-11-25, no-RC]
 
-1.1 (L1)  Unapproved or absent protocol version is rejected   — 0/4 pass
-    FAIL  : mcp.deepwiki.com, mcp.linear.app, mcp.sentry.dev, mcp.stripe.com
+========================================================================
+Per-check validation across servers
+========================================================================
+Negotiated revision: mcp.deepwiki.com [2025-11-25]
 
-1.4 (L1)  Server exposes non-empty identity metadata (serverInfo)   — 4/4 pass
-    PASS  : mcp.deepwiki.com, mcp.linear.app, mcp.sentry.dev, mcp.stripe.com
+1.1 (L1)  Served protocol revisions are pinned and malformed assertions are rejected   — 0/1 pass
+    FAIL   : mcp.deepwiki.com [2025-11-25]
+      · mcp.deepwiki.com: 1.1a: serves 2024-11-05, 2025-03-26, earlier than the
+        2025-06-18 floor this Recommendation sets, so an unapproved revision is
+        reachable by negotiation; the operator allowlist itself was not read; 1.1b:
+        rejected with error code -32600 at HTTP 400; ...
+
+1.4 (L1)  Server identity matches the recorded identity (no unregistered identity)   — 1/1 pass
+    PASS   : mcp.deepwiki.com [2025-11-25]
 ```
+
+`--json` emits the same content as one object per check, with the per-server
+verdicts, evidence and per-leg detail.
 
 ## Results so far
 
-Across four reachable servers (DeepWiki, Linear, Sentry, Stripe), **none pass
-1.1 as written** — they either accept an absent protocol version, or (Stripe)
-accept a bogus one too. All four expose a proper `serverInfo` (1.4). Only one of
-four validates the `Origin` header (2.5), and one serves plaintext HTTP while
-accepting TLS 1.0/1.1 (2.2).
+Probed 2026-09-15 against five hosted servers: DeepWiki, Linear, Sentry, Notion and
+Stripe.
 
-Every check, how it is implemented, what was reduced for a black-box probe, and
-the full per-server results are in [docs/checks.md](docs/checks.md).
+No server passes 1.1: each serves a revision below the floor the recommendation
+sets. Two of the five validate the `Origin` header, one serves plaintext HTTP and
+accepts obsolete TLS, and only Stripe issues a token whose lifetime is within the
+3600-second baseline. Check 10.1 fails on the three servers that answered it, all
+replying `no-cache, no-transform` where the recommendation requires `no-store` or
+`private`. No server negotiates 2026-07-28, so two checks report `NO-REV` on all
+five.
+
+Every check, how it is implemented, what was reduced for a black-box probe, and the
+recorded per-server results are in [docs/checks.md](docs/checks.md).
 
 ## Scope & limitations
 
-- **Black-box only.** It can't see operator-side artifacts (audit logs,
-  enterprise registry, approved-capability baselines, host process inventory).
-  Benchmark checks that depend on those are reduced to their externally
-  observable part, or reported N/A / UNKNOWN.
-- **Streamable HTTP only.** SSE-only servers won't establish a session yet.
-- **Endpoint discovery** tries `/mcp` and `/`, not arbitrary paths (e.g.
-  Atlassian's `/v1/...`).
-- **2026-07-28 is a release candidate** with no live server speaking it yet.
-  Checks that test a mechanism unique to it report `NO-REV`, a verdict distinct
-  from `UNKNOWN`: it can't be resolved by re-running, only by the server
-  adopting the revision.
-- **TLS interception breaks transport checks.** Behind an inspecting proxy the
-  certificate and negotiated TLS version belong to the proxy, not the server.
-  Check the certificate issuer before trusting a 2.2 result.
+- **Black-box only.** Operator-side evidence — audit logs, an enterprise registry,
+  an approved-capability baseline, a host process inventory — is out of reach. A
+  recommendation resting on it is reduced or reported.
+- **Streamable HTTP only.** An SSE-only server does not establish a session yet.
+- **Endpoint discovery** tries `/mcp` and `/`, not arbitrary paths.
+- **One page of each inventory.** Discovery reads a single page and does not retain
+  the pagination cursor, so a verdict covers page one. Affected evidence says so.
+- **TLS interception breaks the transport checks.** Behind an inspecting proxy the
+  certificate and the negotiated version belong to the proxy, so check 2.2 declines
+  to grade and names the issuer.
+- **A probe runs real requests.** Checks call tools, read resources and send one
+  oversized body. Point it at a server you are authorised to test.
 
 ## Repository layout
 
 ```
 src/cis_mcp_probe/
-  client.py       connect by domain, negotiate version, enumerate, run checks
-  oauth.py        interactive OAuth: browser + loopback redirect catcher
-  storage.py      per-server token / client-registration cache
-  rawreq.py       raw JSON-RPC helper for hand-crafted requests
-  baseline.py     per-URL capability baseline store (check 1.2)
-  context.py      ProbeContext: the shared substrate every check reads
-  report.py       check-centric text + JSON report
   cli.py          command-line entry point
+  client.py       connect by domain, negotiate the revision, enumerate, run checks
+  oauth.py        interactive OAuth: browser plus loopback redirect catcher
+  storage.py      per-server token and client-registration cache
+  baseline.py     per-endpoint capability and identity baseline
+  context.py      the shared substrate every check reads
+  inputs.py       operator-supplied per-domain inputs
+  rawreq.py       raw JSON-RPC and HTTP helpers for hand-built requests
+  netguard.py     host guard: where a request and a credential may go
+  tokens.py       token and scope reading
+  observations.py transport observations
+  report.py       check-centric text and JSON report
   checks/
-    base.py       Check base class, results, statuses, registry
-    section1.py   checks 1.1–1.4
-    section2.py   checks 2.1–2.5
+    base.py       the Check base class, results, verdicts, registry
+    section1.py   checks 1.1-1.4
+    section2.py   checks 2.1-2.5
+    section3.py   checks 3.1.1-3.3.5
+    section5.py   checks 5.1.1-5.6.1
+    section7.py   checks 7.1.1-7.2.2
+    section10.py  checks 10.1-10.2
 docs/
-  checks.md       what each check tests, how it's implemented, per-server results
-benchmark/        draft CIS benchmark source and working notes
-                  (git-ignored, confidential)
+  checks.md       what each check requires, how it is implemented, what was reduced,
+                  and the per-server results
 ```
 
 ## Status
 
-Section 1 checks 1.1–1.4 and Section 2 checks 2.1–2.5 implemented and validated
-against live servers. More checks and sections are added as the benchmark draft
-progresses.
+Sections 1, 2, 3, 5, 7 and 10 are implemented and exercised against live servers.
+Sections 4, 6, 8 and 9 were read and hold nothing a client connection can decide.
+Checks are added and revised as the benchmark text moves.
+
+## Authors
+
+Tal Skverer and Tomer Schwartz.
 
 ## License
 
@@ -149,5 +264,5 @@ Released under the [MIT License](LICENSE).
 
 ## Disclaimer
 
-This project is part of the **CIS MCP Security Benchmark** effort and was
-developed by Tal Skverer. It is provided "as is", without warranty of any kind.
+Provided "as is", without warranty of any kind. A verdict from this tool is one
+client's observation of one server at one moment, not a certification.
