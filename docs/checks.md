@@ -956,9 +956,7 @@ the checks as described above. Each section carries its own table.
 | Stripe | `mcp.stripe.com` | OAuth | 2025-03-26 |
 
 Two runs on 2026-09-15 agreed on every check and server that authenticated in both.
-Stripe's column comes from a run of its own, because its cached client registration
-pins a loopback callback port that changes between runs, so every run needs a fresh
-interactive login.
+Stripe's column comes from a run of its own, taken the same day.
 
 | # | Check | deepwiki | linear | sentry | notion | stripe |
 |---|---|---|---|---|---|---|
@@ -1627,16 +1625,13 @@ server, because no server in this table produces either one: a fixture answering
 
 ### Servers not covered
 
-All five servers in the table above now carry a column for every implemented
-section. Two caveats travel with them.
+All five servers in the table above carry a column for every implemented section.
+One caveat travels with them.
 
 - **Notion** (`mcp.notion.com`) is reached through a TLS inspection proxy on this
   network, so check 2.2 declines to grade it and names the issuing authority. Every
   other verdict is unaffected, because the proxy terminates the transport and not the
   protocol.
-- **Stripe** (`mcp.stripe.com`) needs an interactive login on every run. Its cached
-  client registration pins a loopback callback port that changes between runs, so its
-  column comes from a run of its own rather than the batch.
 - **Atlassian** (`mcp.atlassian.com`) has not been probed. Discovery against a bare
   domain tries `/mcp` and then `/`, and Atlassian answers 404 on both while answering
   401 on `/v1/mcp` and `/v1/sse`. It also serves no protected-resource metadata at
