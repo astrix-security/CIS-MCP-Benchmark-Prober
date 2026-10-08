@@ -17,7 +17,7 @@ that was not achieved.
 |---------|---------|
 | `PASS` | The server satisfied the externally observable part of the check. |
 | `FAIL` | The server did not satisfy it. |
-| `N/A` | The entire subsection is operator-side and we defined no check of our own for it. |
+| `N/A` | The entire subsection is operator-side and we defined no check of our own for it. It is also reported on an OAuth check against a server that offers no OAuth at all, where the token, discovery document or scope the check examines was observed not to exist. |
 | `NO-REV` | The check tests a mechanism that exists only in a protocol revision this server does not negotiate. Nothing about the run can change this. |
 | `UNKNOWN` | This run could not decide, and a later run might. No baseline recorded yet, or no event arrived inside the wait window. |
 | `ERROR` | The probe itself failed to reach a verdict. |
@@ -944,7 +944,7 @@ arbitrary tool surface with traversal values.
 
 ## Results against tested servers
 
-Every section below was probed on 2026-09-15 against five hosted MCP servers, using
+Every section below was probed on 2026-10-08 against five hosted MCP servers, using
 the checks as described above. Each section carries its own table.
 
 | Server | Endpoint | Auth | Protocol negotiated |
@@ -955,17 +955,17 @@ the checks as described above. Each section carries its own table.
 | Notion | `mcp.notion.com` | OAuth | 2025-11-25 |
 | Stripe | `mcp.stripe.com` | OAuth | 2025-03-26 |
 
-Two runs on 2026-09-15 agreed on every check and server that authenticated in both.
-Stripe's column comes from a run of its own, taken the same day.
+Each column comes from one run against that server. The baselines the drift checks
+compare against were recorded on 2026-09-15.
 
 | # | Check | deepwiki | linear | sentry | notion | stripe |
 |---|---|---|---|---|---|---|
 | — | **Negotiated revision** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-03-26** |
-| — | Run date | 2026-09-15 | 2026-09-15 | 2026-09-15 | 2026-09-15 | 2026-09-15 |
+| — | Run date | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 |
 | 1.1 | Served revisions pinned, malformed assertions rejected | **FAIL** | **FAIL** | **FAIL** | **FAIL** | **FAIL** |
-| 1.2 | Capability configuration matches recorded baseline | PASS | PASS | PASS | PASS | PASS |
-| 1.3 | Capability beyond the baseline denied until re-approved | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
-| 1.4 | Server identity matches the recorded identity | PASS | PASS | PASS | PASS | PASS |
+| 1.2 | Capability configuration matches recorded baseline | PASS | PASS | PASS | **FAIL** | **FAIL** |
+| 1.3 | Capability beyond the baseline denied until re-approved | UNKNOWN | ERROR | UNKNOWN | UNKNOWN | UNKNOWN |
+| 1.4 | Server identity matches the recorded identity | PASS | PASS | **FAIL** | PASS | PASS |
 | 2.1 | stdio preferred for local, single-user servers | N/A | N/A | N/A | N/A | N/A |
 | 2.2 | TLS required, plaintext disallowed | PASS | PASS | **FAIL** | UNKNOWN | PASS |
 | 2.3 | Auth propagates through proxies on SSE responses | **FAIL** | PASS | PASS | PASS | UNKNOWN |
@@ -974,33 +974,49 @@ Stripe's column comes from a run of its own, taken the same day.
 
 ### Reading the results
 
-- **1.1 — 0/5 decided pass.** Two legs fail on all five servers. Leg `1.1a`: each
-  serves `2024-11-05` and `2025-03-26`, both earlier than the `2025-06-18` floor,
-  so each offers a downgrade path to a revision predating the current security
-  model. Leg `1.1c`: each accepts a request carrying no `MCP-Protocol-Version`
-  header and answers it, rather than refusing to process it under a default
-  revision. Leg `1.1b` passes on all five, but none returns the specified
-  `-32022`: each rejects the unapproved version with `-32600` at HTTP 400, which
-  passes with the code named because the request was still refused. Legs `1.1d`
+- **1.1 — 0/5 decided pass.** Two legs fail on all five servers. Leg `1.1a`:
+  DeepWiki, Linear, Sentry and Notion each serve `2024-11-05` and `2025-03-26`,
+  both earlier than the `2025-06-18` floor, so each offers a downgrade path to a
+  revision predating the current security model. Stripe serves only `2025-03-26`
+  of the two, the revision it negotiates. Leg `1.1c`: each accepts a request
+  carrying no `MCP-Protocol-Version` header and answers it, rather than refusing to
+  process it under a default revision. Leg `1.1b` passes on four, but none returns
+  the specified `-32022`: DeepWiki rejects the unapproved version with `-32600` and
+  Linear, Sentry and Notion with `-32000`, each at HTTP 400, which passes with the
+  code named because the request was still refused. Stripe fails it: it accepts
+  the request asserting the unapproved version and answers it. Legs `1.1d`
   and `1.1e` are `NO-REV` throughout — no server negotiates 2026-07-28, so the
   header-versus-`_meta` pair they test does not exist.
-- **1.2 — 5/5 pass, on the second run.** Each server's advertised capability
-  configuration matches the baseline recorded for it. A first run against a server
-  reports `UNKNOWN`, because a run that records a baseline compares nothing.
-- **1.3 — undecided on all five, and that is the servers' answer rather than the
-  probe's limit.** No tool is advertised beyond the recorded baseline on any of
-  them — 3 tools on DeepWiki, 65 on Linear, 9 on Sentry, all recorded — so no
-  staged capability exists to be gated. The leg decides when a tool does appear:
-  against a baseline with one DeepWiki tool removed, and arguments supplied, it
-  reports `FAIL`, because the staged tool executed and no gate stopped it.
-- **1.4 — 5/5 pass.** Each server's `name|version` pair matches the one recorded for
-  its endpoint. Against a baseline hand-edited to an older version the check reports
-  `FAIL` and names both pairs, so it discriminates rather than passing on any identity
-  at all.
-- **Runs that could not decide.** Sentry is intermittent: one run in three
-  established no session at all and reported `ERROR` for every Section 1 check
-  together, which is a property of the run and not of the server. The verdicts above
-  are from runs that reached a session, and two consecutive such runs agreed.
+- **1.2 — 3/5 pass.** Notion fails: the `listChanged` flag on its tools, resources
+  and prompts capabilities reads `false`, where the baseline recorded `true`. Stripe
+  fails: it advertises the capability `extensions.io.modelcontextprotocol/skills`,
+  which its baseline does not hold. The other three servers' advertised capability
+  configuration matches the baseline recorded for them. All five servers also
+  advertise tool names absent from the baseline, which leg `1.2b` reports without
+  gating the verdict. A first run against a server reports `UNKNOWN`, because a run
+  that records a baseline compares nothing.
+- **1.3 — undecided on all five.** Each server advertises a tool absent from its
+  baseline — 3 tools on DeepWiki, 68 on Linear, 15 on Sentry, 46 on Notion and 10 on
+  Stripe, of which 1, 2, 7, 4 and 1 are new — so each run had a staged tool to call.
+  No arguments were supplied for it. On DeepWiki, Sentry and Notion the staged tool
+  answered with an argument-validation error that names no pending or unauthorized
+  state, so the leg is `UNKNOWN`. On Linear the control tool `extract_images` did
+  not execute cleanly without arguments, so a refusal of the staged tool would not
+  be attributable to a gate, and the check reports `ERROR`. On Stripe the staged
+  tool `send_stripe_feedback` answered `-32602`: its name did not resolve or its
+  arguments were rejected, so nothing about a staging gate was tested. The leg
+  decides once arguments are supplied: against a baseline with one DeepWiki tool
+  removed, and arguments supplied, it reports `FAIL`, because the staged tool
+  executed and no gate stopped it.
+- **1.4 — 4/5 pass.** Sentry fails: it asserts `Sentry MCP|0.42.0`, and the identity
+  recorded for its endpoint is `Sentry MCP|0.39.0`. Each other server's
+  `name|version` pair matches the one recorded for its endpoint. Against a baseline
+  hand-edited to an older version the check reports `FAIL` and names both pairs, so
+  it discriminates rather than passing on any identity at all.
+- **Runs that could not decide.** Sentry has been intermittent: in earlier runs one
+  run in three established no session at all and reported `ERROR` for every
+  Section 1 check together, which is a property of the run and not of the server.
+  The verdicts above are from runs that reached a session.
 - **Leg 1.1a offers two `initialize` requests, not five.** Only two published
   revisions precede the `2025-06-18` floor, so probing the rest cannot change the
   answer. An earlier version probed all five and the resulting burst of nine requests
@@ -1011,9 +1027,9 @@ Stripe's column comes from a run of its own, taken the same day.
   `ECDHE-RSA-AES128-SHA` on the TLS 1.0 handshake. The other three refuse both
   legacy revisions, which shows the sub-test discriminates rather than passing
   everything.
-- **2.3 — 3 of the 4 it graded.** Linear and Sentry refuse the unauthenticated
-  request with 401, accept the authenticated one with 200, and return
-  `text/event-stream`, so the SSE assertion was exercised and both pass. Stripe
+- **2.3 — 3 of the 4 it graded.** Linear, Sentry and Notion refuse the
+  unauthenticated request with 401, accept the authenticated one with 200, and return
+  `text/event-stream`, so the SSE assertion was exercised and all three pass. Stripe
   answers with plain JSON, so that assertion could not be exercised and the
   verdict is UNKNOWN. DeepWiki requires no authentication at all, so an
   unauthenticated request reaches a response: FAIL.
@@ -1021,12 +1037,13 @@ Stripe's column comes from a run of its own, taken the same day.
   routing headers and the `-32020` error do not exist to test. These verdicts
   will resolve on their own as servers adopt the revision.
 - **2.5 — 2/5 pass.** DeepWiki, Linear and Stripe all accept
-  `Origin: http://evil.example.com` and answer 200. Sentry is the only server
-  that returns 403.
+  `Origin: https://cis-rebinding-probe.example` and answer 200. Sentry and Notion
+  return 403.
 
-Sentry is the inverse of the other three: the only server that validates Origin,
-and the only one that serves plaintext HTTP and accepts legacy TLS. No server
-passes both 2.2 and 2.5.
+Sentry is the inverse of DeepWiki, Linear and Stripe: it validates Origin, and it is
+the only server that serves plaintext HTTP and accepts legacy TLS. Notion also
+validates Origin, and its 2.2 is ungraded on this network. No server passes both
+2.2 and 2.5.
 
 ### Detail per check
 
@@ -1034,10 +1051,10 @@ passes both 2.2 and 2.5.
 
 | Server | Plaintext `http://` | TLS 1.0 / 1.1 | Negotiated | Cert expires in |
 |--------|---------------------|---------------|------------|-----------------|
-| DeepWiki | port refused | refused | TLSv1.3 | 83d |
-| Linear | 403 | refused | TLSv1.3 | 65d |
-| Sentry | **200 served** | **both accepted** | TLSv1.3 | 69d |
-| Stripe | 301 redirect | refused | TLSv1.3 | 50d |
+| DeepWiki | port refused | refused | TLSv1.3 | 179d |
+| Linear | 403 | refused | TLSv1.3 | 67d |
+| Sentry | **200 served** | **both accepted** | TLSv1.3 | 72d |
+| Stripe | 301 redirect | refused | TLSv1.3 | 63d |
 
 **2.3 Authentication**
 
@@ -1046,6 +1063,7 @@ passes both 2.2 and 2.5.
 | DeepWiki | n/a (no auth) | n/a | n/a |
 | Linear | 401 | 200 | SSE |
 | Sentry | 401 | 200 | SSE |
+| Notion | 401 | 200 | SSE |
 | Stripe | 401 | 200 | plain JSON |
 
 **2.5 Origin**
@@ -1055,6 +1073,7 @@ passes both 2.2 and 2.5.
 | DeepWiki | 200 | 200 | FAIL |
 | Linear | 200 | 200 | FAIL |
 | Sentry | **403** | 200 | PASS |
+| Notion | **403** | 200 | PASS |
 | Stripe | 200 | 200 | FAIL |
 
 ### Section 3 results
@@ -1066,34 +1085,37 @@ discovery document to validate, and no scope to read.
 | # | Check | deepwiki | linear | sentry | notion | stripe |
 |---|---|---|---|---|---|---|
 | — | **Negotiated revision** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-03-26** |
-| — | Run date | 2026-09-15 | 2026-09-15 | 2026-09-15 | 2026-09-15 | 2026-09-15 |
-| 3.1.2 | Authentication required, tokens short-lived | **FAIL** | **FAIL** | **FAIL** | **FAIL** | PASS |
+| — | Run date | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 |
+| 3.1.2 | Authentication required, tokens short-lived | **FAIL** | **FAIL** | PASS | **FAIL** | PASS |
 | 3.1.1 | stdio credentials from environment or store | N/A | N/A | N/A | N/A | N/A |
 | 3.2.1 | Per-tool authorization enforced | N/A | N/A | N/A | N/A | N/A |
 | 3.2.2 | Token audience confined to audited resource | N/A | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
 | 3.3.1 | Token bound to the audience that requested it | N/A | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
 | 3.3.5 | OAuth proxy validates redirect_uri, state, consent | N/A | N/A | N/A | N/A | UNKNOWN |
 | 3.2.3 | Tool annotations not relied on for gating | N/A | N/A | N/A | N/A | N/A |
-| 3.3.4 | Granted scopes minimized | N/A | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+| 3.3.4 | Granted scopes minimized | N/A | UNKNOWN | **FAIL** | UNKNOWN | UNKNOWN |
 | 3.3.3 | Downstream identities not shared | N/A | N/A | N/A | N/A | N/A |
 | 3.3.2 | Discovery metadata over TLS and validated | N/A | PASS | PASS | PASS | PASS |
 
 No Section 3 leg depends on protocol revision 2026-07-28, so no Section 3 check
-reports `NO-REV`. Stripe negotiates 2025-03-26, the oldest revision of the three,
-and still serves RFC 9728 metadata that every discovery leg reads.
+reports `NO-REV`. Stripe negotiates 2025-03-26, the older of the two revisions in
+the table, and still serves RFC 9728 metadata that every discovery leg reads.
 
 ### Reading the Section 3 results
 
-- **3.1.2 — 1/5 pass, and the four failures do not fail alike.** DeepWiki
+- **3.1.2 — 2/5 pass, and the three failures do not fail alike.** DeepWiki
   requires no authentication, so an unauthenticated request reached a response and
-  leg `3.1.2a` fails. Linear refuses correctly and names `resource_metadata`, then
-  fails leg `3.1.2b`: its issued lifetime is 86100 seconds against the 3600-second
-  baseline. Stripe passes all four legs: it refuses with a 401 naming
-  `resource_metadata`, and its issued lifetime is exactly 3600 seconds.
-- **DeepWiki is `N/A` on all six OAuth checks.** Every discovery path answered a
-  clean 404 and no request drew a 401 challenge, so the server states it offers no
-  OAuth. That is an observed absence, not an undecided run, which is why these are
-  `N/A` rather than `UNKNOWN`.
+  leg `3.1.2a` fails. Linear and Notion refuse correctly and name
+  `resource_metadata`, then fail leg `3.1.2b`: their issued lifetimes are 86100 and
+  28800 seconds against the 3600-second baseline. Sentry and Stripe pass all four
+  legs: each refuses with a 401 naming `resource_metadata`, and each issued lifetime
+  is exactly 3600 seconds.
+- **DeepWiki is `N/A` on five of the six wire checks: 3.2.2, 3.3.1, 3.3.2, 3.3.4 and
+  3.3.5.** Every discovery path answered a clean 404 and no request drew a 401
+  challenge, so the server states it offers no OAuth. That is an observed absence,
+  not an undecided run, which is why these are `N/A` rather than `UNKNOWN`. The
+  sixth, 3.1.2, asks whether authentication is required at all, so the same
+  observation fails it.
 - **3.2.2 and 3.3.1 are `UNKNOWN` on Linear because its access token is opaque.** No
   `aud` claim is readable, so neither audience leg can be observed. Leg `3.3.1c`
   probed ten candidates on `api.linear.app` and `linear.app`; each answered the
@@ -1101,11 +1123,18 @@ and still serves RFC 9728 metadata that every discovery leg reads.
   `3.3.1b` reached the wire and got the conforming answer: Linear's authorization
   server refused to mint a token for the wrong-audience resource with
   `invalid_target`, which is RFC 8707 enforcement, and which leaves Linear's own
-  audience validation untested.
+  audience validation untested. Sentry and Notion are `UNKNOWN` on both for the same
+  three reasons: an opaque token, ten candidates that decided nothing, and an
+  `invalid_target` refusal on leg `3.3.1b`.
 - **3.3.4 is `UNKNOWN` on Linear because leg `3.3.4e` has no operator input.** No tool
   is named as outside the grant, so no out-of-scope call was made. The other legs
   decided: granted scopes `read write`, no wildcard, within the recorded baseline,
-  and the advertised surface carries no admin-tier scope.
+  and the advertised surface carries no admin-tier scope. Notion and Stripe are
+  `UNKNOWN` on `3.3.4e` alone, with granted scopes `default` and `mcp`.
+- **3.3.4 fails on Sentry, on leg `3.3.4c`.** Its granted scopes are `org:read
+  project:write team:write event:write alerts:write`, and `alerts:write` is absent
+  from the baseline recorded on 2026-09-15. No granted scope is a wildcard, and the
+  advertised surface carries no admin-tier scope.
 - **3.3.2 passes on Linear.** Two discovery paths answered and serve the same
   document, both over https, the advertised `resource` equals the canonical URI,
   one authorization server is advertised, it is in the recorded baseline, and its
@@ -1114,50 +1143,43 @@ and still serves RFC 9728 metadata that every discovery leg reads.
   client may try collapse to two documents.
 - **3.2.2 and 3.3.1 are `UNKNOWN` on Stripe too, and its access token is opaque as
   well.** Leg `3.3.1c` produced the one live pass of that leg so far:
-  `https://api.stripe.com/v1/account` answered 401 to the MCP token while answering
-  differently without it, so a downstream API on the same registrable domain
-  refused a credential minted for the MCP server. The other nine candidates
-  answered the same either way and decided nothing. Leg `3.3.1b` is `UNKNOWN` for a
-  reason of its own: the endpoint refused the control request carrying the probe's
-  own token, so no refusal of a differently-bound token would have been
-  attributable to audience validation.
-- **3.3.4 is `UNKNOWN` on Stripe on two legs.** Granted scope is `mcp`, no wildcard,
-  and within the recorded baseline. `3.3.4d` is undecided because the
-  protected-resource document advertises no `scopes_supported` at all, and `3.3.4e`
-  because no operator input names a tool outside the grant.
-  `3.3.4f` passed on the third discovery source alone: the challenge carried no
-  `scope`, the protected-resource `scopes_supported` was absent, and the
-  authorization server advertised `['mcp']`. A check that consulted only the first
-  two sources would have failed a working server.
-- **3.3.2 passes on Stripe, and it took two runs.** Six legs passed on the first
-  run: TLS, one answering discovery path, https, an advertised `resource` that is a
-  hierarchical parent of the canonical URI, one advertised authorization server, and
-  a published `issuer` that string-equals it. Leg `3.3.2f` was undecided, because no
-  baseline held an `authorization_servers` category for this endpoint. A run with
-  `--update-baseline` recorded `['https://access.stripe.com/mcp']`, and the next run
-  compared against it and passed. `3.3.2f` is the one leg here that reports on drift
-  rather than on a property of a single run, so it needs two runs by construction.
+  `https://api.stripe.com/v1/account` answered 401 to the MCP token, so a
+  downstream API on the same registrable domain refused a credential minted for the
+  MCP server. The other nine candidates decided nothing. Leg `3.3.1b` passed: the
+  endpoint refused a token the authorization server minted for a different resource
+  with 401 while accepting the probe's own, and the refresh chain was restored for
+  the audited resource afterwards. The check stays `UNKNOWN` because leg `3.3.1a`
+  cannot read the audience of an opaque token.
+- **3.3.2 passes on Stripe on all seven legs:** TLS, one answering discovery path,
+  https, an advertised `resource` that is a hierarchical parent of the canonical
+  URI, one advertised authorization server, `https://access.stripe.com/mcp`, which
+  is in the recorded baseline, and a published `issuer` that string-equals it.
+  `3.3.2f` is the one leg here that reports on drift rather than on a property of a
+  single run: it compares against the list a run with `--update-baseline` recorded,
+  so it needs two runs by construction.
 - **3.3.5 decides on no target, and they reach that differently.**
   DeepWiki serves no authorization-server metadata at all. Linear's authorization
   endpoint is `https://mcp.linear.app/authorize`, on the MCP endpoint's own host, so
   it authorizes for itself and fronts nothing; the gate settled that from metadata
-  alone, and neither of those two targets left a scratch client in the token store.
+  alone. Sentry and Notion are the same case, on their own hosts, and none of those
+  four targets left a scratch client in the token store.
   Stripe is the one target whose metadata gate opened: its authorization server is
   `https://access.stripe.com/mcp`, a separate host, so the probe registered two
   clients and compared what each authorize response carried onward. Both answered
-  302, and neither `Location` carried a `client_id`. With no shared static client id
-  established, the recommendation is vacuous for it and the three test legs never
-  ran.
+  302 with a redirect to Stripe's dashboard login, where each client id sits inside
+  the `redirect` parameter, and the probe had no pair of onward client ids to
+  compare. So whether Stripe fronts a separate authorization server on one shared static client
+  id is undecided, the check reports `UNKNOWN`, and the three test legs never ran.
 
 ### Section 5 results
 
-Probed 2026-09-06 against all four servers.
+Probed 2026-10-08 against all five servers.
 
 | # | Check | deepwiki | linear | sentry | notion | stripe |
 |---|---|---|---|---|---|---|
 | — | **Negotiated revision** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-03-26** |
-| — | Run date | 2026-09-15 | 2026-09-15 | 2026-09-15 | 2026-09-15 | 2026-09-15 |
-| — | *Tools / resources / templates / prompts* | *3 / 0 / 0 / 0* | *61 / 0 / 0 / 0* | *9 / 0 / 0 / 0* | *10 / 1 / 0 / 0* |
+| — | Run date | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 |
+| — | *Tools / resources / templates / prompts* | *3 / 0 / 0 / 0* | *68 / 0 / 0 / 0* | *15 / 0 / 0 / 0* | *46 / 8 / 0 / 2* | *10 / 1 / 0 / 0* |
 | 5.1.1 | Tool schemas validated | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
 | 5.1.2 | Resource templates declared | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
 | 5.1.3 | Prompt arguments declared and validated | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
@@ -1171,17 +1193,22 @@ Probed 2026-09-06 against all four servers.
 
 ### Reading the Section 5 results
 
-**No check decided on any server.** Every probed check reports `UNKNOWN` or `NO-REV`, and every
-operator-side one reports `N/A`. That is the honest outcome and it needs saying plainly, because a
-matrix of `UNKNOWN` reads as broken checks otherwise. Four separate causes, none a defect:
+**One check decided, on two servers.** 5.4.1 passes on Notion and Stripe. Every other probed check
+reports `UNKNOWN` or `NO-REV`, and every operator-side one reports `N/A`. That is the honest outcome
+and it needs saying plainly, because a matrix of `UNKNOWN` reads as broken checks otherwise. Four
+separate causes, none a defect:
 
-- **No server negotiates 2026-07-28**, so 5.2.3 reports `NO-REV` on all four. The recommendation
+- **No server negotiates 2026-07-28**, so 5.2.3 reports `NO-REV` on all five. The recommendation
   describes behaviour that revision introduced; under an older one the opposite is correct. Check
-  2.4 reads `NO-REV` on the same four servers for the same reason.
-- **No server advertises a resource template or a prompt.** Three declare the corresponding
-  capabilities and populate none of them, and the evidence distinguishes that from declaring no
-  capability at all, because the two describe different servers. So 5.1.2 and 5.1.3 have nothing to
-  read on any target.
+  2.4 reads `NO-REV` on the same five servers for the same reason.
+- **No server advertises a resource template, and only Notion advertises prompts.** DeepWiki,
+  Notion and Stripe declare the resources capability and advertise no template, DeepWiki and Stripe
+  declare the prompts capability and advertise no prompt, and Linear and Sentry declare neither
+  capability. The evidence distinguishes declaring a capability and populating none of it from
+  declaring no capability at all, because the two describe different servers. So 5.1.2 has nothing
+  to read on any target. On 5.1.3, Notion's two prompts pass both declaration legs, but neither
+  declares a required argument and no `prompts/get` control succeeded, so the two refusal legs had
+  nothing to compare against.
 - **5.1.1's schema legs all passed and the check still reports `UNKNOWN`.** Its remaining leg needs
   an operator-supplied tool and argument object, reports `UNKNOWN` without one, and a check carries
   the weakest of its parts.
@@ -1189,17 +1216,21 @@ matrix of `UNKNOWN` reads as broken checks otherwise. Four separate causes, none
 
 **What did decide, underneath the check verdicts.** The legs are where the measurement lives:
 
-- **83 tool input schemas compiled with no failure** — 3 on DeepWiki, 61 on Linear, 9 on Sentry, 10
-  on Stripe. None declared an unrecognised dialect, and none carried an external reference.
-- **Output schemas are declared inconsistently.** DeepWiki, Sentry and Stripe declare one on every
-  tool; Linear declares none on any of its 61. So that leg decides on three servers and reports
-  `UNKNOWN` on the fourth, rather than being vacuous either way.
+- **142 tool input schemas compiled with no failure** — 3 on DeepWiki, 68 on Linear, 15 on Sentry,
+  46 on Notion and 10 on Stripe. None declared an unrecognised dialect, and none carried an external
+  reference.
+- **Output schemas are declared inconsistently.** DeepWiki declares one on every tool, Stripe on 8
+  of its 10, Sentry on 4 of its 15 and Notion on 2 of its 46; Linear declares none on any of its 68.
+  So that leg decides on four servers and reports `UNKNOWN` on Linear, rather than being vacuous
+  either way.
 
-**No traversal payload was sent to any server.** 5.4.1 requires a control read returning content
-before it sends anything, and no target provided one: three advertise no resource at all, and
-Stripe's single resource — a UI widget — returned no content to a plain read. So the check reports
-`UNKNOWN` on all four, and the disclosure above describes a capability that, on this target set, was
-never exercised.
+**A traversal payload was sent to two servers, and both refused it.** 5.4.1 requires a control read
+returning content before it sends anything. DeepWiki, Linear and Sentry advertise no resource at
+all, so no read was sent and the check reports `UNKNOWN` on them. Notion's first advertised resource,
+`notion://docs/skills`, returned contents, and the traversal read built from it was refused with a
+JSON-RPC error. Stripe's single resource, the UI widget `ui://widget/balance-summary.html`, returned
+contents, and the traversal read built from it was refused the same way. Both pass, so the
+disclosure above describes a capability this target set exercised.
 
 **5.2.3 was verified against local fixtures instead.** No available server exercises it, so a
 compliant fixture confirms the four probes pass together and a deliberately non-compliant one
@@ -1211,7 +1242,7 @@ says.
 
 ### Section 3 coverage gaps
 
-Ten checks reporting verdicts do not mean the coverage is complete. Six gaps
+Ten checks reporting verdicts do not mean the coverage is complete. Five gaps
 remain, and each names what closing it needs.
 
 1. **Check 3.3.5's three test legs — `3.3.5a`, `3.3.5b` and `3.3.5c` — have no live
@@ -1226,11 +1257,13 @@ remain, and each names what closing it needs.
    list, so a tool error mentioning `scope`, `401` or `403` for an unrelated
    reason would read as a scope refusal. The evidence carries a 200-character
    excerpt of the refusal, so an operator can audit the call.
-3. **Leg 3.3.1b's rotation path is untested.** No authorization server has minted a
-   wrong-audience token yet. Linear refused the request with `invalid_target`, and
-   on Stripe the control request was refused first, so the leg returned before it
-   asked. A server that does mint such a token would exercise that path for the
-   first time.
+3. **Leg 3.3.1b decides only where the authorization server mints a wrong-audience
+   token.** Stripe's did, and the leg passed: the endpoint refused the minted token
+   with 401 while accepting the probe's own, and the rotated refresh token restored
+   the cached credential for the audited resource. Linear, Sentry and Notion refused
+   to mint with `invalid_target`, the conforming answer, which leaves those
+   endpoints' own audience validation untested. Closing this needs a token bound to
+   another resource from some other source, which a black-box client does not hold.
 4. **Check 3.3.4 compares the granted scopes against a recorded baseline, not
    against an approved set.** The benchmark audit compares them against an approved
    cumulative scope set the deployment documents in its capability baseline, and
@@ -1243,22 +1276,24 @@ remain, and each names what closing it needs.
    to confirm the documented exception when it falls inside. That distinction cannot
    be drawn without the approved set from gap 4, so this gap closes only after that
    one.
-6. **Sentry has no Section 3 column at all.** See below.
 
 Two legs need two runs by construction, because both report on drift rather than on
 a property of one run: `3.3.4c` compares the granted scope set against the baseline,
 and `3.3.2f` compares the advertised authorization server list. Both are decided on
-every target in the table. On a server that rotates refresh tokens, that pair of
+every target that offers OAuth. On a server that rotates refresh tokens, that pair of
 runs used to cost two interactive logins, because `3.3.1b` spent the cached token.
 The refresh-chain restore described above removes that cost.
 
-**One login therefore covers the capture run and every ordinary run after it, for
-as long as the cached refresh token stays valid.** The access token expires on the
-server's own schedule — an hour on some servers, a day on others — and a run whose
-cached access token has expired spends the refresh token instead of asking for
-another login. Two conditions end that: an authorization server that expires the
-refresh token as well, and `--reauth`, which discards both on purpose. A run that
-cannot refresh says so, opens a browser, and waits for the login.
+**On a server that mints that token, one login therefore covers the capture run and
+every ordinary run after it, for as long as the cached refresh token stays valid.**
+The access token expires on the server's own schedule — an hour on some servers, a
+day on others — and a run whose cached access token has expired spends the refresh
+token instead of asking for another login. Two conditions end that: an authorization
+server that expires the refresh token as well, and `--reauth`, which discards both on
+purpose. A run that cannot refresh says so, opens a browser, and waits for the login.
+On a server that refuses to mint it, as Linear, Sentry and Notion do, leg `3.3.1b`
+discards the refresh token it spent, so the first run after the cached access token
+expires needs a fresh login.
 
 ## Section 7 — observability and audit
 
@@ -1390,10 +1425,12 @@ carrying notifications where none is a progress notification is the third.
 
 ### Section 7 results
 
-Probed 2026-09-07 and 2026-09-08.
+Probed 2026-10-08 against all five servers.
 
 | Check | DeepWiki | Linear | Stripe | Notion | Sentry |
 |---|---|---|---|---|---|
+| **Negotiated revision** | **2025-11-25** | **2025-11-25** | **2025-03-26** | **2025-11-25** | **2025-11-25** |
+| Run date | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 |
 | 7.1.1 | `N/A` | `N/A` | `N/A` | `N/A` | `N/A` |
 | 7.1.2 | **`FAIL`** | `PASS` | `ERROR` | `PASS` | `PASS` |
 | 7.1.3 | `N/A` | `N/A` | `N/A` | `N/A` | `N/A` |
@@ -1405,17 +1442,16 @@ authentication.
 
 **7.1.2 separates the five targets three ways.** DeepWiki answers a null request id
 with `202` and an empty body, accepting it as though it were a notification, which
-fails. Linear and Sentry refuse it with `400` and `-32600`, the exact shape the
-benchmark names. Stripe answers `400` with `content-length: 0`, so the refusal carries
-no JSON-RPC error object and cannot be attributed to the server rather than to
-something in front of it, which is `ERROR` and not a pass. Notion also refuses with
-`400` and `-32600` when the request carries a current credential, but the run recorded
-`UNKNOWN` for the reason named below.
+fails. Linear, Sentry and Notion refuse it with `400` and `-32600`, the exact shape
+the benchmark names. Stripe answers `400` with no JSON-RPC error object, so the
+refusal cannot be attributed to the server rather than to something in front of it,
+which is `ERROR` and not a pass.
 
 **7.2.1 has one real verdict.** Stripe is the only target whose authorization server
 minted a token for another resource, and it then refused that token with `401` while
-accepting the valid one. Everywhere else the authorization server declined to mint one,
-which is itself the conforming answer, so the leg is undecided.
+accepting the valid one. The authorization servers of Linear, Sentry and Notion declined
+to mint one, which is itself the conforming answer, and DeepWiki has no authorization
+server, so on those four the leg is undecided.
 
 **7.2.2 has no live coverage.** DeepWiki opens a server-to-client notification
 stream. No target sent a notification during a run, so neither leg had anything to
@@ -1425,9 +1461,9 @@ scope probe to call, and no target has one.
 **One limitation worth naming.** The access token is snapshotted onto the context when
 the session starts, and the SDK's OAuth provider may refresh it mid-run. A later raw
 request then presents a credential the server has retired and draws `401`, which the
-check reports as undecided rather than as a finding. That is what happened to 7.1.2 on
-Notion: the same request with a freshly read token returns `400` and `-32600`, the
-clean refusal.
+check reports as undecided rather than as a finding. That happened to 7.1.2 on Notion
+in an earlier run: the same request with a freshly read token returns `400` and
+`-32600`, the clean refusal.
 ## Section 10 — caching and resource limits
 
 ### 10.1 Static resources are cached with freshness limits and per-user data is never shared-cached
@@ -1578,7 +1614,7 @@ every input the two checks accept was absent.
 | # | Check | deepwiki | linear | sentry | notion | stripe |
 |---|---|---|---|---|---|---|
 | — | **Negotiated revision** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-11-25** | **2025-03-26** |
-| — | Run date | 2026-09-15 | 2026-09-15 | 2026-09-15 | 2026-09-15 | 2026-09-15 |
+| — | Run date | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 | 2026-10-08 |
 | 10.1 | Static cached with validators, per-user never shared-cached | **FAIL** | **FAIL** | **FAIL** | **FAIL** | UNKNOWN |
 | 10.2 | Request-body size limit enforced | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
 
@@ -1589,8 +1625,8 @@ Per leg:
 | 10.1a static resource | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
 | 10.1b dynamic content | **FAIL** | **FAIL** | **FAIL** | **FAIL** | PASS |
 | 10.1c cacheable fields | reported | reported | reported | reported | reported |
-| 10.2a oversized body | UNKNOWN | UNKNOWN | UNKNOWN |
-| 10.2b the five deferred obligations | not probed | not probed | not probed |
+| 10.2a oversized body | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+| 10.2b the five deferred obligations | not probed | not probed | not probed | not probed | not probed |
 
 ### Reading the Section 10 results
 
@@ -1606,22 +1642,23 @@ Per leg:
 - **10.1a — `UNKNOWN` on all five, as expected.** None of them is a web server, and
   no operator named a static path. This leg decides only on a deployment that
   co-hosts static assets behind the same hostname.
-- **10.1c — no server carries the fields.** Four negotiate 2025-11-25 and Stripe
-  2025-03-26, and neither revision defines
-  `resultType`, `ttlMs` or `cacheScope`, so their absence is not a
-  deviation and the evidence says so. On a server negotiating 2026-07-28 the same
+- **10.1c — only Stripe carries the fields.** Four negotiate 2025-11-25, which does
+  not define `resultType`, `ttlMs` or `cacheScope`, so their absence is not a
+  deviation and the evidence says so. Stripe negotiates 2025-03-26 and still returns
+  all three: `resultType` `complete`, `ttlMs` 0 and `cacheScope` `private`. On a
+  server negotiating 2026-07-28 the same
   absence would be reported as a schema deviation instead. Either way the leg carries
   no verdict.
-- **10.2 — `UNKNOWN` on all three, and never `FAIL`.** Each accepted a 1 MiB body with
-  a 200 while its control also answered 200. That shows no limit at or below 1 MiB; it
-  does not show that no limit exists, so none of the three is reported as
-  non-compliant. Setting `max_request_bytes` to a deployment's configured limit is
-  what turns this into a decision.
+- **10.2 — `UNKNOWN` on all five, and never `FAIL`.** Each accepted a 1 MiB body with
+  a 200 while its control also answered 200. That shows no limit at or below 1 MiB;
+  it does not show that no limit exists, so none of the five is reported as
+  non-compliant. Setting `max_request_bytes` to a
+  deployment's configured limit is what turns this into a decision.
 
-Both `PASS` branches were exercised against a local fixture rather than a live
-server, because no server in this table produces either one: a fixture answering
+Both `PASS` branches were exercised against a local fixture: a fixture answering
 `Cache-Control: no-store` passes `10.1b`, and one rejecting an oversized body with
-413 passes `10.2a`.
+413 passes `10.2a`. Only `10.1b` also has a live pass, on Stripe's `no-store`; no
+server in this table produces the `10.2a` one.
 
 ### Servers not covered
 

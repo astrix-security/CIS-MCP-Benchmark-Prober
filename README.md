@@ -122,7 +122,7 @@ connection.
 | `FAIL` | It did not. |
 | `UNKNOWN` | The run made the observation and it does not decide: no baseline recorded yet, an operator input nobody supplied, or a refusal whose reason answers a different question. A later run may decide. |
 | `ERROR` | The observation was never made. The probe could not run, or the response cannot be attributed to the server. A bare status with no protocol error body is served the same way by a gateway in front of it. |
-| `N/A` | The whole recommendation is operator-side and no check of our own is defined for it. |
+| `N/A` | The whole recommendation is operator-side and no check of our own is defined for it. It is also reported on an OAuth check against a server that offers no OAuth at all, where the token, discovery document or scope the check examines was observed not to exist. |
 | `NO-REV` | The check tests a mechanism that exists only in a protocol revision this server does not speak. Re-running cannot change it; only the server adopting the revision can. |
 
 ## How it connects
@@ -190,14 +190,14 @@ verdicts, evidence and per-leg detail.
 
 ## Results so far
 
-Probed 2026-09-15 against five hosted servers: DeepWiki, Linear, Sentry, Notion and
+Probed 2026-10-08 against five hosted servers: DeepWiki, Linear, Sentry, Notion and
 Stripe.
 
 No server passes 1.1: each serves a revision below the floor the recommendation
 sets. Two of the five validate the `Origin` header, one serves plaintext HTTP and
-accepts obsolete TLS, and only Stripe issues a token whose lifetime is within the
-3600-second baseline. Check 10.1 fails on the three servers that answered it, all
-replying `no-cache, no-transform` where the recommendation requires `no-store` or
+accepts obsolete TLS, and only Sentry and Stripe issue a token whose lifetime is
+within the 3600-second baseline. Check 10.1 fails on four of the five, all replying
+`no-cache, no-transform` where the recommendation requires `no-store` or
 `private`. No server negotiates 2026-07-28, so two checks report `NO-REV` on all
 five.
 
