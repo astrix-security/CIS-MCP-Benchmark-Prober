@@ -127,7 +127,7 @@ requires-dist = [
     { name = "certifi" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4.26.0" },
-    { name = "mcp", specifier = ">=1.28.1" },
+    { name = "mcp", specifier = ">=1.28.1,<2" },
     { name = "truststore", specifier = ">=0.10" },
 ]
 
