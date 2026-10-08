@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 from mcp.client.auth import TokenStorage
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
@@ -68,6 +69,27 @@ class FileTokenStorage(TokenStorage):
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         self._client_path.write_text(client_info.model_dump_json(indent=2))
+
+    def registered_callback_port(self) -> int | None:
+        """The loopback port the cached client registered as its redirect, if any.
+
+        A cached client id is valid only with the redirect URI it was registered
+        with, and some authorization servers compare that URI exactly, port
+        included. Returns None when there is no cached client, when it does not
+        parse, or when its first redirect URI is not
+        ``http://127.0.0.1:<port>/callback``.
+        """
+        try:
+            record = json.loads(self._client_path.read_text())
+            redirect = urlparse(str(record["redirect_uris"][0]))
+            port = redirect.port
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            return None
+        if redirect.scheme != "http" or redirect.hostname != "127.0.0.1":
+            return None
+        if redirect.path != "/callback":
+            return None
+        return port
 
     def clear(self) -> None:
         """Forget any cached credentials for this server (forces re-auth)."""

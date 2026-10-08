@@ -713,6 +713,28 @@ def _reset_session_state(ctx: ProbeContext) -> None:
     ctx.foreign_audience_token = None
 
 
+def _bind_callback(storage: FileTokenStorage) -> LoopbackCallbackServer:
+    """Bind the login callback on the port the cached client registered.
+
+    The authorization request pairs the cached client id with this callback's
+    redirect URI, so the two must match the registration. With no cached client
+    there is nothing to match, and the OS picks the port.
+    """
+    port = storage.registered_callback_port()
+    if port is None:
+        return LoopbackCallbackServer()
+    try:
+        return LoopbackCallbackServer(port=port)
+    except OSError:
+        print(
+            f"  note: port {port}, registered as this server's login callback, is "
+            "in use; a browser login on this run may be refused. --reauth "
+            "registers a new client.",
+            file=sys.stderr,
+        )
+        return LoopbackCallbackServer()
+
+
 async def _session_attempt(
     ctx: ProbeContext,
     endpoint: str,
@@ -725,7 +747,7 @@ async def _session_attempt(
 
     Raises on connection/auth failure so the caller can retry.
     """
-    callback = LoopbackCallbackServer()
+    callback = _bind_callback(storage)
     provider = _make_oauth_provider(
         endpoint, storage, callback, ctx.auth_server_metadata
     )
