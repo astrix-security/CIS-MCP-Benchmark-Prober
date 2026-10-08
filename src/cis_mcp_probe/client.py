@@ -109,19 +109,21 @@ def _handshake(
     obs: HttpObservation, host: str, port: int, context: ssl.SSLContext
 ) -> None:
     """Record one completed handshake into ``obs``, or raise."""
-    with socket.create_connection((host, port), timeout=10) as sock:
-        with context.wrap_socket(sock, server_hostname=host) as ssock:
-            obs.tls_version = ssock.version()
-            cipher = ssock.cipher()
-            obs.tls_cipher = cipher[0] if cipher else None
-            cert = ssock.getpeercert() or {}
-            obs.tls_cert = {
-                "subject": dict(x[0] for x in cert.get("subject", [])),
-                "issuer": dict(x[0] for x in cert.get("issuer", [])),
-                "notAfter": cert.get("notAfter"),
-                "notBefore": cert.get("notBefore"),
-            }
-            obs.status = 0
+    with (
+        socket.create_connection((host, port), timeout=10) as sock,
+        context.wrap_socket(sock, server_hostname=host) as ssock,
+    ):
+        obs.tls_version = ssock.version()
+        cipher = ssock.cipher()
+        obs.tls_cipher = cipher[0] if cipher else None
+        cert = ssock.getpeercert() or {}
+        obs.tls_cert = {
+            "subject": dict(x[0] for x in cert.get("subject", [])),
+            "issuer": dict(x[0] for x in cert.get("issuer", [])),
+            "notAfter": cert.get("notAfter"),
+            "notBefore": cert.get("notBefore"),
+        }
+        obs.status = 0
 
 
 def _tls_sync(host: str, port: int = 443) -> HttpObservation:
@@ -195,12 +197,14 @@ def _tls_version_sync(host: str, version_name: str, port: int = 443) -> HttpObse
             sslctx.set_ciphers("DEFAULT@SECLEVEL=0")
         except ssl.SSLError:
             pass  # older/stricter builds: proceed with defaults
-        with socket.create_connection((host, port), timeout=10) as sock:
-            with sslctx.wrap_socket(sock, server_hostname=host) as ssock:
-                obs.tls_version = ssock.version()
-                cipher = ssock.cipher()
-                obs.tls_cipher = cipher[0] if cipher else None
-                obs.status = 0  # handshake completed -> version accepted
+        with (
+            socket.create_connection((host, port), timeout=10) as sock,
+            sslctx.wrap_socket(sock, server_hostname=host) as ssock,
+        ):
+            obs.tls_version = ssock.version()
+            cipher = ssock.cipher()
+            obs.tls_cipher = cipher[0] if cipher else None
+            obs.status = 0  # handshake completed -> version accepted
     except Exception as e:  # noqa: BLE001 — a failure here is the evidence
         obs.error = repr(e)
     return obs
@@ -437,18 +441,17 @@ async def _observe_notification_channel(ctx: ProbeContext, endpoint: str) -> Non
     try:
         async with httpx.AsyncClient(
             timeout=10.0, follow_redirects=False, verify=verify_context()
-        ) as client:
-            async with client.stream("GET", endpoint, headers=headers) as resp:
-                content_type = resp.headers.get("content-type", "")
-                ctx.notification_channel = resp.status_code == 200 and (
-                    "text/event-stream" in content_type
-                )
-                ctx.http["notify:stream"] = HttpObservation(
-                    url=endpoint,
-                    method="GET",
-                    status=resp.status_code,
-                    headers={"content-type": content_type},
-                )
+        ) as client, client.stream("GET", endpoint, headers=headers) as resp:
+            content_type = resp.headers.get("content-type", "")
+            ctx.notification_channel = resp.status_code == 200 and (
+                "text/event-stream" in content_type
+            )
+            ctx.http["notify:stream"] = HttpObservation(
+                url=endpoint,
+                method="GET",
+                status=resp.status_code,
+                headers={"content-type": content_type},
+            )
     except Exception as e:  # noqa: BLE001
         ctx.http["notify:stream"] = HttpObservation(
             url=endpoint, method="GET", error=repr(e)
@@ -769,27 +772,26 @@ async def _session_attempt(
             read,
             write,
             get_session_id,
-        ):
-            async with ClientSession(
-                read, write, message_handler=collect_notification
-            ) as session:
-                ctx.session = session
-                ctx.init_result = await session.initialize()
-                _record_result_meta(ctx, "initialize", ctx.init_result)
-                ctx.authenticated = auth_required
-                ctx.negotiated_version = ctx.init_result.protocolVersion
-                try:
-                    ctx.session_id = get_session_id()
-                except Exception:  # noqa: BLE001
-                    ctx.session_id = None
-                tokens = await storage.get_tokens()
-                if tokens:
-                    ctx.access_token = tokens.access_token
-                    ctx.token_expires_in = tokens.expires_in
-                    ctx.token_scope = tokens.scope
-                await _observe_notification_channel(ctx, endpoint)
-                await _enumerate(ctx, session)
-                await _detect_rc_support(ctx)
-                return await _run_checks(ctx, checks)
+        ), ClientSession(
+            read, write, message_handler=collect_notification
+        ) as session:
+            ctx.session = session
+            ctx.init_result = await session.initialize()
+            _record_result_meta(ctx, "initialize", ctx.init_result)
+            ctx.authenticated = auth_required
+            ctx.negotiated_version = ctx.init_result.protocolVersion
+            try:
+                ctx.session_id = get_session_id()
+            except Exception:  # noqa: BLE001
+                ctx.session_id = None
+            tokens = await storage.get_tokens()
+            if tokens:
+                ctx.access_token = tokens.access_token
+                ctx.token_expires_in = tokens.expires_in
+                ctx.token_scope = tokens.scope
+            await _observe_notification_channel(ctx, endpoint)
+            await _enumerate(ctx, session)
+            await _detect_rc_support(ctx)
+            return await _run_checks(ctx, checks)
     finally:
         callback.close()
