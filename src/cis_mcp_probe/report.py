@@ -13,6 +13,9 @@ kept only as metadata on each check for reference.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,6 +30,61 @@ _MARK = {
     Status.UNKNOWN: "UNKNOWN",
     Status.ERROR: "ERROR",
 }
+
+# Terminal styling. Colour only on a TTY and only without NO_COLOR.
+VERBOSE = False
+_ANSI = {
+    Status.PASS: "32",  # green
+    Status.FAIL: "1;31",  # bold red
+    Status.NOT_APPLICABLE: "90",  # grey
+    Status.REVISION_UNSUPPORTED: "90",
+    Status.UNKNOWN: "33",  # yellow
+    Status.ERROR: "1;33",
+}
+_ICON = {
+    Status.PASS: "✓",
+    Status.FAIL: "✗",
+    Status.NOT_APPLICABLE: "·",
+    Status.REVISION_UNSUPPORTED: "·",
+    Status.UNKNOWN: "?",
+    Status.ERROR: "!",
+}
+
+
+def _use_colour(stream) -> bool:
+    return stream.isatty() and "NO_COLOR" not in os.environ
+
+
+def _paint(text: str, code: str, stream=sys.stdout) -> str:
+    return f"\033[{code}m{text}\033[0m" if _use_colour(stream) else text
+
+
+def _fit(text: str, room: int) -> str:
+    return text if len(text) <= room else text[: max(room - 1, 0)] + "…"
+
+
+def _width() -> int:
+    return shutil.get_terminal_size((100, 24)).columns
+
+
+def progress_line(r: CheckResult, done: int, total: int) -> str:
+    """One live line per finished check, for stderr."""
+    mark = f"{_ICON[r.status]} {_MARK[r.status]:7s}"
+    head = f"  [{done:>2}/{total}] "
+    title = _fit(f"{r.check_id:6s} {r.title}", _width() - len(head) - len(mark) - 2)
+    return head + _paint(mark, _ANSI[r.status], sys.stderr) + " " + title
+
+
+def totals_line(runs: list[ProbeRun]) -> str:
+    counts = {s: 0 for s in _ORDER}
+    for run in runs:
+        for r in run.results:
+            counts[r.status] += 1
+    parts = [
+        _paint(f"{_MARK[s]} {counts[s]}", _ANSI[s]) for s in _ORDER if counts[s]
+    ]
+    return "Totals: " + "   ".join(parts)
+
 
 # Order statuses appear in the per-check breakdown.
 _ORDER = [
@@ -141,20 +199,29 @@ def render_check_report(runs: list[ProbeRun]) -> str:
 
         lines.append("")
         lines.append(
-            f"{entry['check_id']} ({entry['level']})  {entry['title']}   — {rate}"
+            _paint(f"{entry['check_id']} ({entry['level']})  {entry['title']}", "1")
+            + f"   — {rate}"
         )
         for status in _ORDER:
             domains = buckets[status]
             if domains:
                 shown = ", ".join(label(d) for d in sorted(domains))
-                lines.append(f"    {_MARK[status]:7s}: {shown}")
+                mark = _paint(f"{_ICON[status]} {_MARK[status]:7s}", _ANSI[status])
+                lines.append(f"    {mark}: {shown}")
         # Show one representative evidence line per failing server for context.
         # REVISION_UNSUPPORTED gets one too: it explains which revision is missing.
         for status in (Status.FAIL, Status.REVISION_UNSUPPORTED):
             for domain in sorted(buckets[status]):
                 ev = servers[domain].evidence
                 if ev:
-                    lines.append(f"      · {domain}: {ev}")
+                    ev_line = f"      · {domain}: {ev}"
+                    if not VERBOSE:
+                        ev_line = _fit(ev_line, _width())
+                    lines.append(_paint(ev_line, "2"))
+    lines.append("")
+    lines.append(totals_line(runs))
+    if not VERBOSE:
+        lines.append(_paint("(evidence truncated to the terminal width; -v shows it in full)", "2"))
     lines.append("")
     return "\n".join(lines)
 

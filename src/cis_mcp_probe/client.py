@@ -528,6 +528,10 @@ async def _detect_rc_support(ctx: ProbeContext) -> None:
         ctx.rc_supported = ver == RC_VERSION
 
 
+# Set by the CLI to print each verdict as it lands.
+ON_RESULT = None
+
+
 async def _run_checks(ctx: ProbeContext, checks: list[Check]) -> list[CheckResult]:
     results: list[CheckResult] = []
     for check in checks:
@@ -544,6 +548,8 @@ async def _run_checks(ctx: ProbeContext, checks: list[Check]) -> list[CheckResul
                     evidence=f"Check raised: {e!r}",
                 )
             )
+        if ON_RESULT is not None:
+            ON_RESULT(results[-1], len(results), len(checks))
     return results
 
 

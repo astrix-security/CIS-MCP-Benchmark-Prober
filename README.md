@@ -149,6 +149,7 @@ uv sync
 uv run cis-mcp-probe mcp.deepwiki.com                       # one server
 uv run cis-mcp-probe mcp.linear.app mcp.sentry.dev          # several at once
 uv run cis-mcp-probe mcp.notion.com --update-baseline       # record or refresh the baseline; run this first
+uv run cis-mcp-probe mcp.deepwiki.com -v                    # evidence in full, not cut to the terminal width
 uv run cis-mcp-probe mcp.deepwiki.com --json                # machine-readable report on stdout
 uv run cis-mcp-probe mcp.stripe.com --info                  # connect and enumerate only, no checks
 uv run cis-mcp-probe mcp.stripe.com --reauth                # discard cached credentials and log in again
@@ -163,11 +164,24 @@ prints which checks are affected when an entry is missing.
 
 ## Example output
 
+Each check prints one line as it finishes:
+
+```
+  [ 1/36] ✗ FAIL    1.1    Served protocol revisions are pinned and malformed assertions are rejected
+  [ 2/36] ✗ FAIL    1.2    Advertised capability configuration matches the recorded baseline
+  [ 3/36] ? UNKNOWN 1.3    A capability advertised beyond the baseline is denied until re-approved
+  [ 6/36] ✓ PASS    2.2    TLS is required for HTTP and plaintext is disallowed
+  [ 8/36] · NO-REV  2.4    Required request metadata headers are present and consistent with the body
+```
+
+The report follows, one entry per check, with evidence cut to the terminal width
+unless `-v` is given:
+
 ```
 ========================================================================
 Targets probed: 1
 ========================================================================
-  mcp.deepwiki.com             ok          DeepWiki 2.14.3  [auth=False, proto=2025-11-25, no-RC]
+  mcp.deepwiki.com             ok          DeepWiki 4.0.2  [auth=False, proto=2025-11-25, no-RC]
 
 ========================================================================
 Per-check validation across servers
@@ -175,15 +189,17 @@ Per-check validation across servers
 Negotiated revision: mcp.deepwiki.com [2025-11-25]
 
 1.1 (L1)  Served protocol revisions are pinned and malformed assertions are rejected   — 0/1 pass
-    FAIL   : mcp.deepwiki.com [2025-11-25]
-      · mcp.deepwiki.com: 1.1a: serves 2024-11-05, 2025-03-26, earlier than the
-        2025-06-18 floor this Recommendation sets, so an unapproved revision is
-        reachable by negotiation; the operator allowlist itself was not read; 1.1b:
-        rejected with error code -32600 at HTTP 400; ...
+    ✗ FAIL   : mcp.deepwiki.com [2025-11-25]
+      · mcp.deepwiki.com: 1.1a: serves 2024-11-05, 2025-03-26, earlier than the 2025-06-18 floor this Recomme…
 
-1.4 (L1)  Server identity matches the recorded identity (no unregistered identity)   — 1/1 pass
-    PASS   : mcp.deepwiki.com [2025-11-25]
+2.2 (L1)  TLS is required for HTTP and plaintext is disallowed   — 1/1 pass
+    ✓ PASS   : mcp.deepwiki.com [2025-11-25]
+
+Totals: PASS 1   FAIL 8   NO-REV 2   UNKNOWN 8   N/A 17
 ```
+
+Verdicts are coloured on a terminal. Colour is off when output is redirected or
+`NO_COLOR` is set.
 
 `--json` emits the same content as one object per check, with the per-server
 verdicts, evidence and per-leg detail.
