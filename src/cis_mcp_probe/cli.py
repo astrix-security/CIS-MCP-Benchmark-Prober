@@ -20,8 +20,10 @@ from pathlib import Path
 import anyio
 
 from . import checks as checks_pkg
+from . import client as client_mod
+from . import report as report_mod
 from .client import connect_and_probe
-from .report import ProbeRun, render_report, to_json
+from .report import ProbeRun, progress_line, render_report, to_json
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -45,6 +47,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="record/refresh the capability baseline for each server (check 1.2). "
         "Run this the first time you probe a server, and occasionally to update it.",
+    )
+    p.add_argument(
+        "-v", "--verbose", action="store_true", help="show evidence in full"
     )
     p.add_argument(
         "--timeout", type=float, default=30.0, help="per-request timeout seconds"
@@ -71,6 +76,11 @@ async def _run(args: argparse.Namespace) -> int:
         return 2
 
     checks = [] if args.info else checks_pkg.all_checks()
+    report_mod.VERBOSE = args.verbose
+    if not args.json:
+        client_mod.ON_RESULT = lambda r, done, total: print(
+            progress_line(r, done, total), file=sys.stderr
+        )
     runs: list[ProbeRun] = []
     for domain in targets:
         if not args.json:
